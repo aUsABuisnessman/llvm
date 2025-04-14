@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <set>
+#include <string_view>
 #include <vector>
 
 namespace sycl {
@@ -43,6 +44,19 @@ bool device_image_plain::has_kernel(const kernel_id &KernelID,
 
 ur_native_handle_t device_image_plain::getNative() const {
   return impl->getNative();
+}
+
+backend device_image_plain::ext_oneapi_get_backend_impl() const noexcept {
+  return impl->get_context().get_backend();
+}
+
+std::pair<const std::byte *, const std::byte *>
+device_image_plain::ext_oneapi_get_backend_content_view_impl() const {
+  return std::make_pair(
+      reinterpret_cast<const std::byte *>(
+          impl->get_bin_image_ref()->getRawData().BinaryStart),
+      reinterpret_cast<const std::byte *>(
+          impl->get_bin_image_ref()->getRawData().BinaryEnd));
 }
 
 ////////////////////////////
@@ -122,6 +136,26 @@ bool kernel_bundle_plain::ext_oneapi_has_kernel(detail::string_view name) {
 
 kernel kernel_bundle_plain::ext_oneapi_get_kernel(detail::string_view name) {
   return impl->ext_oneapi_get_kernel(name.data(), impl);
+}
+
+detail::string
+kernel_bundle_plain::ext_oneapi_get_raw_kernel_name(detail::string_view name) {
+  return detail::string{impl->ext_oneapi_get_raw_kernel_name(name.data())};
+}
+
+bool kernel_bundle_plain::ext_oneapi_has_device_global(
+    detail::string_view name) {
+  return impl->ext_oneapi_has_device_global(name.data());
+}
+
+void *kernel_bundle_plain::ext_oneapi_get_device_global_address(
+    detail::string_view name, const device &dev) {
+  return impl->ext_oneapi_get_device_global_address(name.data(), dev);
+}
+
+size_t kernel_bundle_plain::ext_oneapi_get_device_global_size(
+    detail::string_view name) {
+  return impl->ext_oneapi_get_device_global_size(name.data());
 }
 
 //////////////////////////////////
@@ -303,7 +337,18 @@ std::vector<sycl::device> find_device_intersection(
 //////////////////////////
 
 std::vector<kernel_id> get_kernel_ids() {
-  return detail::ProgramManager::getInstance().getAllSYCLKernelIDs();
+  std::vector<kernel_id> ids =
+      detail::ProgramManager::getInstance().getAllSYCLKernelIDs();
+  // Filter out kernel ids coming from RTC kernels in order to be
+  // spec-compliant. Kernel ids from RTC are prefixed with rtc_NUM$, so looking
+  // for '$' should be enough.
+  ids.erase(std::remove_if(ids.begin(), ids.end(),
+                           [](kernel_id id) {
+                             std::string_view sv(id.get_name());
+                             return sv.find('$') != std::string_view::npos;
+                           }),
+            ids.end());
+  return ids;
 }
 
 bool is_compatible(const std::vector<kernel_id> &KernelIDs, const device &Dev) {
@@ -352,8 +397,6 @@ bool is_source_kernel_bundle_supported(backend BE, source_language Language) {
     } else if (Language == source_language::spirv) {
       return true;
     } else if (Language == source_language::sycl) {
-      return detail::SYCL_Compilation_Available();
-    } else if (Language == source_language::sycl_jit) {
       return detail::SYCL_JIT_Compilation_Available();
     }
   }
@@ -397,7 +440,7 @@ make_kernel_bundle_from_source(const context &SyclContext,
   std::shared_ptr<kernel_bundle_impl> KBImpl =
       std::make_shared<kernel_bundle_impl>(SyclContext, Language, Source,
                                            IncludePairs);
-  return sycl::detail::createSyclObjFromImpl<source_kb>(KBImpl);
+  return sycl::detail::createSyclObjFromImpl<source_kb>(std::move(KBImpl));
 }
 
 source_kb make_kernel_bundle_from_source(const context &SyclContext,
@@ -412,7 +455,7 @@ source_kb make_kernel_bundle_from_source(const context &SyclContext,
 
   std::shared_ptr<kernel_bundle_impl> KBImpl =
       std::make_shared<kernel_bundle_impl>(SyclContext, Language, Bytes);
-  return sycl::detail::createSyclObjFromImpl<source_kb>(KBImpl);
+  return sycl::detail::createSyclObjFromImpl<source_kb>(std::move(KBImpl));
 }
 
 /////////////////////////
@@ -438,10 +481,11 @@ exe_kb build_from_source(
     LogPtr = &Log;
   std::vector<device> UniqueDevices =
       sycl::detail::removeDuplicateDevices(Devices);
-  std::shared_ptr<kernel_bundle_impl> sourceImpl = getSyclObjImpl(SourceKB);
+  const std::shared_ptr<kernel_bundle_impl> &sourceImpl =
+      getSyclObjImpl(SourceKB);
   std::shared_ptr<kernel_bundle_impl> KBImpl = sourceImpl->build_from_source(
       UniqueDevices, Options, LogPtr, KernelNames);
-  auto result = sycl::detail::createSyclObjFromImpl<exe_kb>(KBImpl);
+  auto result = sycl::detail::createSyclObjFromImpl<exe_kb>(std::move(KBImpl));
   if (LogView)
     *LogView = Log;
   return result;

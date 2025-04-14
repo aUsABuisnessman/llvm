@@ -107,7 +107,7 @@ context queue::get_context() const { return impl->get_context(); }
 device queue::get_device() const { return impl->get_device(); }
 
 ext::oneapi::experimental::queue_state queue::ext_oneapi_get_state() const {
-  return impl->getCommandGraph()
+  return impl->hasCommandGraph()
              ? ext::oneapi::experimental::queue_state::recording
              : ext::oneapi::experimental::queue_state::executing;
 }
@@ -255,7 +255,6 @@ event queue::submit_impl_and_postprocess(
   return impl->submit(CGH, impl, SecondQueue.impl, CodeLoc, IsTopCodeLoc,
                       &PostProcess);
 }
-#endif // __INTEL_PREVIEW_BREAKING_CHANGES
 
 event queue::submit_with_event_impl(std::function<void(handler &)> CGH,
                                     const detail::SubmissionInfo &SubmitInfo,
@@ -265,6 +264,21 @@ event queue::submit_with_event_impl(std::function<void(handler &)> CGH,
 }
 
 void queue::submit_without_event_impl(std::function<void(handler &)> CGH,
+                                      const detail::SubmissionInfo &SubmitInfo,
+                                      const detail::code_location &CodeLoc,
+                                      bool IsTopCodeLoc) {
+  impl->submit_without_event(CGH, impl, SubmitInfo, CodeLoc, IsTopCodeLoc);
+}
+#endif // __INTEL_PREVIEW_BREAKING_CHANGES
+
+event queue::submit_with_event_impl(const detail::type_erased_cgfo_ty &CGH,
+                                    const detail::SubmissionInfo &SubmitInfo,
+                                    const detail::code_location &CodeLoc,
+                                    bool IsTopCodeLoc) {
+  return impl->submit_with_event(CGH, impl, SubmitInfo, CodeLoc, IsTopCodeLoc);
+}
+
+void queue::submit_without_event_impl(const detail::type_erased_cgfo_ty &CGH,
                                       const detail::SubmissionInfo &SubmitInfo,
                                       const detail::code_location &CodeLoc,
                                       bool IsTopCodeLoc) {
@@ -285,7 +299,7 @@ getBarrierEventForInorderQueueHelper(const detail::QueueImplPtr QueueImpl) {
   // as a graph can record from multiple queues and we cannot guarantee the
   // last node added by an in-order queue will be the last node added to the
   // graph.
-  assert(!QueueImpl->getCommandGraph() &&
+  assert(!QueueImpl->hasCommandGraph() &&
          "Should not be called in on graph recording.");
 
   sycl::detail::optional<event> LastEvent = QueueImpl->getLastEvent();
@@ -305,7 +319,7 @@ getBarrierEventForInorderQueueHelper(const detail::QueueImplPtr QueueImpl) {
 /// \return a SYCL event object, which corresponds to the queue the command
 /// group is being enqueued on.
 event queue::ext_oneapi_submit_barrier(const detail::code_location &CodeLoc) {
-  if (is_in_order() && !impl->getCommandGraph() && !impl->MDiscardEvents &&
+  if (is_in_order() && !impl->hasCommandGraph() && !impl->MDiscardEvents &&
       !impl->MIsProfilingEnabled) {
     event InOrderLastEvent = getBarrierEventForInorderQueueHelper(impl);
     // If the last event was discarded, fall back to enqueuing a barrier.
@@ -331,9 +345,9 @@ event queue::ext_oneapi_submit_barrier(const std::vector<event> &WaitList,
       begin(WaitList), end(WaitList), [&](const event &Event) -> bool {
         auto EventImpl = detail::getSyclObjImpl(Event);
         return (EventImpl->isDefaultConstructed() || EventImpl->isNOP()) &&
-               !EventImpl->getCommandGraph();
+               !EventImpl->hasCommandGraph();
       });
-  if (is_in_order() && !impl->getCommandGraph() && !impl->MDiscardEvents &&
+  if (is_in_order() && !impl->hasCommandGraph() && !impl->MDiscardEvents &&
       !impl->MIsProfilingEnabled && AllEventsEmptyOrNop) {
     event InOrderLastEvent = getBarrierEventForInorderQueueHelper(impl);
     // If the last event was discarded, fall back to enqueuing a barrier.

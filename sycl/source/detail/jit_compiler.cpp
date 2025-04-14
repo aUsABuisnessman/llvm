@@ -13,6 +13,7 @@
 #include <detail/jit_compiler.hpp>
 #include <detail/kernel_bundle_impl.hpp>
 #include <detail/kernel_impl.hpp>
+#include <detail/persistent_device_code_cache.hpp>
 #include <detail/queue_impl.hpp>
 #include <detail/sycl_mem_obj_t.hpp>
 #include <sycl/detail/os_util.hpp>
@@ -90,6 +91,15 @@ jit_compiler::jit_compiler()
       return false;
     }
 
+    this->CalculateHashHandle = reinterpret_cast<CalculateHashFuncT>(
+        sycl::detail::ur::getOsLibraryFuncAddress(LibraryPtr.get(),
+                                                  "calculateHash"));
+    if (!this->CalculateHashHandle) {
+      printPerformanceWarning(
+          "Cannot resolve JIT library function entry point");
+      return false;
+    }
+
     this->CompileSYCLHandle = reinterpret_cast<CompileSYCLFuncT>(
         sycl::detail::ur::getOsLibraryFuncAddress(LibraryPtr.get(),
                                                   "compileSYCL"));
@@ -98,6 +108,16 @@ jit_compiler::jit_compiler()
           "Cannot resolve JIT library function entry point");
       return false;
     }
+
+    this->DestroyBinaryHandle = reinterpret_cast<DestroyBinaryFuncT>(
+        sycl::detail::ur::getOsLibraryFuncAddress(LibraryPtr.get(),
+                                                  "destroyBinary"));
+    if (!this->DestroyBinaryHandle) {
+      printPerformanceWarning(
+          "Cannot resolve JIT library function entry point");
+      return false;
+    }
+
     LibraryHandle = std::move(LibraryPtr);
     return true;
   };
@@ -117,7 +137,7 @@ translateBinaryImageFormat(ur::DeviceBinaryType Type) {
   }
 }
 
-::jit_compiler::BinaryFormat getTargetFormat(QueueImplPtr &Queue) {
+::jit_compiler::BinaryFormat getTargetFormat(const QueueImplPtr &Queue) {
   auto Backend = Queue->getDeviceImplPtr()->getBackend();
   switch (Backend) {
   case backend::ext_oneapi_level_zero:
@@ -134,7 +154,7 @@ translateBinaryImageFormat(ur::DeviceBinaryType Type) {
   }
 }
 
-::jit_compiler::TargetInfo getTargetInfo(QueueImplPtr &Queue) {
+::jit_compiler::TargetInfo getTargetInfo(const QueueImplPtr &Queue) {
   ::jit_compiler::BinaryFormat Format = getTargetFormat(Queue);
   return ::jit_compiler::TargetInfo::get(
       Format, static_cast<::jit_compiler::DeviceArchitecture>(
@@ -160,6 +180,8 @@ translateArgType(kernel_param_kind_t Kind) {
     return PK::Stream;
   case kind::kind_work_group_memory:
     return PK::WorkGroupMemory;
+  case kind::kind_dynamic_work_group_memory:
+    return PK::DynamicWorkGroupMemory;
   case kind::kind_invalid:
     return PK::Invalid;
   }
@@ -639,7 +661,7 @@ updatePromotedArgs(const ::jit_compiler::SYCLKernelInfo &FusedKernelInfo,
 }
 
 ur_kernel_handle_t jit_compiler::materializeSpecConstants(
-    QueueImplPtr Queue, const RTDeviceBinaryImage *BinImage,
+    const QueueImplPtr &Queue, const RTDeviceBinaryImage *BinImage,
     const std::string &KernelName,
     const std::vector<unsigned char> &SpecConstBlob) {
 #ifndef _WIN32
@@ -780,7 +802,7 @@ jit_compiler::fuseKernels(QueueImplPtr Queue,
     assert(KernelCmd->isFusable());
     auto *KernelCG = static_cast<CGExecKernel *>(&CG);
 
-    auto KernelName = KernelCG->MKernelName;
+    auto &KernelName = KernelCG->MKernelName;
     if (KernelName.empty()) {
       printPerformanceWarning(
           "Cannot fuse kernel with invalid kernel function name");
@@ -1022,16 +1044,13 @@ jit_compiler::fuseKernels(QueueImplPtr Queue,
       FusedOrCachedKernelName);
 
   std::shared_ptr<detail::kernel_bundle_impl> KernelBundleImplPtr;
-  if (TargetFormat == ::jit_compiler::BinaryFormat::SPIRV) {
-    detail::getSyclObjImpl(get_kernel_bundle<bundle_state::executable>(
-        Queue->get_context(), {Queue->get_device()}, {FusedKernelId}));
-  }
 
   std::unique_ptr<detail::CG> FusedCG;
   FusedCG.reset(new detail::CGExecKernel(
       NDRDesc, nullptr, nullptr, std::move(KernelBundleImplPtr),
-      std::move(CGData), std::move(FusedArgs), FusedOrCachedKernelName, {}, {},
-      CGType::Kernel, KernelCacheConfig, false /* KernelIsCooperative */,
+      std::move(CGData), std::move(FusedArgs),
+      std::move(FusedOrCachedKernelName), {}, {}, CGType::Kernel,
+      KernelCacheConfig, false /* KernelIsCooperative */,
       false /* KernelUsesClusterLaunch*/, 0 /* KernelWorkGroupMemorySize */));
   return FusedCG;
 }
@@ -1130,12 +1149,12 @@ sycl_device_binaries jit_compiler::createPIDeviceBinary(
   return JITDeviceBinaries.back().getPIDeviceStruct();
 }
 
-sycl_device_binaries jit_compiler::createDeviceBinaryImage(
+sycl_device_binaries jit_compiler::createDeviceBinaries(
     const ::jit_compiler::RTCBundleInfo &BundleInfo,
-    const std::string &OffloadEntryPrefix) {
-  DeviceBinariesCollection Collection;
+    const std::string &Prefix) {
+  auto Collection = std::make_unique<DeviceBinariesCollection>();
 
-  for (const auto &DevImgInfo : BundleInfo) {
+  for (const auto &DevImgInfo : BundleInfo.DevImgInfos) {
     DeviceBinaryContainer Binary;
     for (const auto &Symbol : DevImgInfo.SymbolTable) {
       // Create an offload entry for each kernel. We prepend a unique prefix to
@@ -1143,38 +1162,55 @@ sycl_device_binaries jit_compiler::createDeviceBinaryImage(
       // entrypoints remain unchanged.
       // It seems to be OK to set zero for most of the information here, at
       // least that is the case for compiled SPIR-V binaries.
-      std::string PrefixedName = OffloadEntryPrefix + Symbol.c_str();
+      std::string PrefixedName = Prefix + Symbol.c_str();
       OffloadEntryContainer Entry{PrefixedName, /*Addr=*/nullptr, /*Size=*/0,
                                   /*Flags=*/0, /*Reserved=*/0};
       Binary.addOffloadEntry(std::move(Entry));
     }
 
     for (const auto &FPS : DevImgInfo.Properties) {
+      bool IsDeviceGlobalsPropSet =
+          FPS.Name == __SYCL_PROPERTY_SET_SYCL_DEVICE_GLOBALS;
       PropertySetContainer PropSet{FPS.Name.c_str()};
       for (const auto &FPV : FPS.Values) {
         if (FPV.IsUIntValue) {
           PropSet.addProperty(
               PropertyContainer{FPV.Name.c_str(), FPV.UIntValue});
         } else {
+          std::string PrefixedName =
+              (IsDeviceGlobalsPropSet ? Prefix : "") + FPV.Name.c_str();
           PropSet.addProperty(PropertyContainer{
-              FPV.Name.c_str(), FPV.Bytes.begin(), FPV.Bytes.size(),
+              PrefixedName.c_str(), FPV.Bytes.begin(), FPV.Bytes.size(),
               sycl_property_type::SYCL_PROPERTY_TYPE_BYTE_ARRAY});
         }
       }
       Binary.addProperty(std::move(PropSet));
+
+      Binary.setCompileOptions(BundleInfo.CompileOptions.c_str());
     }
 
-    Collection.addDeviceBinary(std::move(Binary),
-                               DevImgInfo.BinaryInfo.BinaryStart,
-                               DevImgInfo.BinaryInfo.BinarySize,
-                               (DevImgInfo.BinaryInfo.AddressBits == 64)
-                                   ? __SYCL_DEVICE_BINARY_TARGET_SPIRV64
-                                   : __SYCL_DEVICE_BINARY_TARGET_SPIRV32,
-                               SYCL_DEVICE_BINARY_TYPE_SPIRV);
+    Collection->addDeviceBinary(std::move(Binary),
+                                DevImgInfo.BinaryInfo.BinaryStart,
+                                DevImgInfo.BinaryInfo.BinarySize,
+                                (DevImgInfo.BinaryInfo.AddressBits == 64)
+                                    ? __SYCL_DEVICE_BINARY_TARGET_SPIRV64
+                                    : __SYCL_DEVICE_BINARY_TARGET_SPIRV32,
+                                SYCL_DEVICE_BINARY_TYPE_SPIRV);
   }
 
-  JITDeviceBinaries.push_back(std::move(Collection));
-  return JITDeviceBinaries.back().getPIDeviceStruct();
+  sycl_device_binaries Binaries = Collection->getPIDeviceStruct();
+
+  std::lock_guard<std::mutex> Guard{RTCDeviceBinariesMutex};
+  RTCDeviceBinaries.emplace(Binaries, std::move(Collection));
+  return Binaries;
+}
+
+void jit_compiler::destroyDeviceBinaries(sycl_device_binaries Binaries) {
+  std::lock_guard<std::mutex> Guard{RTCDeviceBinariesMutex};
+  for (uint16_t i = 0; i < Binaries->NumDeviceBinaries; ++i) {
+    DestroyBinaryHandle(Binaries->DeviceBinaries[i].BinaryStart);
+  }
+  RTCDeviceBinaries.erase(Binaries);
 }
 
 std::vector<uint8_t> jit_compiler::encodeArgUsageMask(
@@ -1225,27 +1261,19 @@ std::vector<uint8_t> jit_compiler::encodeReqdWorkGroupSize(
   return Encoded;
 }
 
-sycl_device_binaries jit_compiler::compileSYCL(
+std::pair<sycl_device_binaries, std::string> jit_compiler::compileSYCL(
     const std::string &CompilationID, const std::string &SYCLSource,
     const std::vector<std::pair<std::string, std::string>> &IncludePairs,
-    const std::vector<std::string> &UserArgs, std::string *LogPtr,
-    const std::vector<std::string> &RegisteredKernelNames) {
-
-  // RegisteredKernelNames may contain template specializations, so we just put
-  // them in main() which ensures they are instantiated.
-  std::ostringstream ss;
-  ss << SYCLSource << '\n';
-  ss << "int main() {\n";
-  for (const std::string &KernelName : RegisteredKernelNames) {
-    ss << "  (void)" << KernelName << ";\n";
-  }
-  ss << "  return 0;\n}\n" << std::endl;
-
-  std::string FinalSource = ss.str();
+    const std::vector<std::string> &UserArgs, std::string *LogPtr) {
+  auto appendToLog = [LogPtr](const char *Msg) {
+    if (LogPtr) {
+      LogPtr->append(Msg);
+    }
+  };
 
   std::string SYCLFileName = CompilationID + ".cpp";
   ::jit_compiler::InMemoryFile SourceFile{SYCLFileName.c_str(),
-                                          FinalSource.c_str()};
+                                          SYCLSource.c_str()};
 
   std::vector<::jit_compiler::InMemoryFile> IncludeFilesView;
   IncludeFilesView.reserve(IncludePairs.size());
@@ -1260,18 +1288,49 @@ sycl_device_binaries jit_compiler::compileSYCL(
                  std::back_inserter(UserArgsView),
                  [](const auto &Arg) { return Arg.c_str(); });
 
-  auto Result = CompileSYCLHandle(SourceFile, IncludeFilesView, UserArgsView);
+  std::string CacheKey;
+  std::vector<char> CachedIR;
+  if (PersistentDeviceCodeCache::isEnabled()) {
+    auto Result =
+        CalculateHashHandle(SourceFile, IncludeFilesView, UserArgsView);
 
-  if (LogPtr) {
-    LogPtr->append(Result.getBuildLog());
+    if (Result.failed()) {
+      appendToLog(Result.getPreprocLog());
+    } else {
+      CacheKey = Result.getHash();
+      CachedIR = PersistentDeviceCodeCache::getDeviceCodeIRFromDisc(CacheKey);
+    }
   }
 
-  if (Result.failed()) {
-    throw sycl::exception(sycl::errc::build, Result.getBuildLog());
+  auto Result = CompileSYCLHandle(SourceFile, IncludeFilesView, UserArgsView,
+                                  CachedIR, /*SaveIR=*/!CacheKey.empty());
+
+  const char *BuildLog = Result.getBuildLog();
+  appendToLog(BuildLog);
+  switch (Result.getErrorCode()) {
+    using RTCErrC = ::jit_compiler::RTCErrorCode;
+  case RTCErrC::BUILD:
+    throw sycl::exception(sycl::errc::build, BuildLog);
+  case RTCErrC::INVALID:
+    throw sycl::exception(sycl::errc::invalid, BuildLog);
+  default: // RTCErrC::SUCCESS
+    break;
   }
 
-  return createDeviceBinaryImage(Result.getBundleInfo(),
-                                 /*OffloadEntryPrefix=*/CompilationID + '$');
+  const auto &IR = Result.getDeviceCodeIR();
+  if (!CacheKey.empty() && !IR.empty()) {
+    // The RTC result contains the bitcode blob iff the frontend was invoked on
+    // the source string, meaning we encountered either a cache miss, or a cache
+    // hit that returned unusable IR (e.g. due to a bitcode version mismatch).
+    // There's no explicit mechanism to invalidate the cache entry - we just
+    // overwrite the entry with the newly compiled IR.
+    std::vector<char> SavedIR{IR.begin(), IR.end()};
+    PersistentDeviceCodeCache::putDeviceCodeIRToDisc(CacheKey, SavedIR);
+  }
+
+  std::string Prefix = CompilationID + '$';
+  return std::make_pair(createDeviceBinaries(Result.getBundleInfo(), Prefix),
+                        std::move(Prefix));
 }
 
 } // namespace detail

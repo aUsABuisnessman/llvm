@@ -128,9 +128,11 @@ StringRef mapIntelGPUArchName(StringRef ArchName);
 class SYCLInstallationDetector {
 public:
   SYCLInstallationDetector(const Driver &D);
+  SYCLInstallationDetector(const Driver &D, const llvm::Triple &HostTriple,
+                           const llvm::opt::ArgList &Args);
   void getSYCLDeviceLibPath(
       llvm::SmallVector<llvm::SmallString<128>, 4> &DeviceLibPaths) const;
-  void AddSYCLIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+  void addSYCLIncludeArgs(const llvm::opt::ArgList &DriverArgs,
                           llvm::opt::ArgStringList &CC1Args) const;
   void print(llvm::raw_ostream &OS) const;
 
@@ -138,6 +140,7 @@ private:
   const Driver &D;
   llvm::SmallVector<llvm::SmallString<128>, 4> InstallationCandidates;
 };
+
 
 class Command;
 
@@ -266,6 +269,11 @@ public:
 } // end namespace SYCL
 } // end namespace tools
 
+inline bool isSYCLNativeCPU(const llvm::Triple &Triple) {
+  return Triple.getArch() == llvm::Triple::UnknownArch &&
+         Triple.str() == "native_cpu";
+}
+
 namespace toolchains {
 
 class LLVM_LIBRARY_VISIBILITY SYCLToolChain : public ToolChain {
@@ -306,12 +314,12 @@ public:
 
   bool useIntegratedAs() const override { return true; }
   bool isPICDefault() const override {
-    if (this->IsSYCLNativeCPU)
+    if (isSYCLNativeCPU(this->getTriple()))
       return this->HostTC.isPICDefault();
     return false;
   }
   llvm::codegenoptions::DebugInfoFormat getDefaultDebugFormat() const override {
-    if (this->IsSYCLNativeCPU ||
+    if (isSYCLNativeCPU(this->getTriple()) &&
         this->HostTC.getTriple().isWindowsMSVCEnvironment())
       return this->HostTC.getDefaultDebugFormat();
     return ToolChain::getDefaultDebugFormat();
@@ -323,7 +331,7 @@ public:
 
   void addClangWarningOptions(llvm::opt::ArgStringList &CC1Args) const override;
   CXXStdlibType GetCXXStdlibType(const llvm::opt::ArgList &Args) const override;
-  void AddSYCLIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+  void addSYCLIncludeArgs(const llvm::opt::ArgList &DriverArgs,
                           llvm::opt::ArgStringList &CC1Args) const override;
   void
   AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
@@ -334,11 +342,6 @@ public:
 
   SanitizerMask getSupportedSanitizers() const override;
 
-  const ToolChain &HostTC;
-  const bool IsSYCLNativeCPU;
-
-  SYCLInstallationDetector SYCLInstallation;
-
 protected:
   Tool *buildBackendCompiler() const override;
   Tool *buildLinker() const override;
@@ -347,27 +350,11 @@ private:
   void TranslateGPUTargetOpt(const llvm::opt::ArgList &Args,
                              llvm::opt::ArgStringList &CmdArgs,
                              llvm::opt::OptSpecifier Opt_EQ) const;
+  const ToolChain &HostTC;
+  SYCLInstallationDetector SYCLInstallation;
 };
 
 } // end namespace toolchains
-
-inline bool isSYCLNativeCPU(const llvm::opt::ArgList &Args) {
-  if (auto SYCLTargets = Args.getLastArg(options::OPT_fsycl_targets_EQ)) {
-    if (SYCLTargets->containsValue("native_cpu"))
-      return true;
-  }
-  return false;
-}
-
-inline bool isSYCLNativeCPU(const llvm::Triple &HostT,
-                            const llvm::Triple &DevT) {
-  return HostT == DevT;
-}
-
-inline bool isSYCLNativeCPU(const ToolChain &TC) {
-  const llvm::Triple *const AuxTriple = TC.getAuxTriple();
-  return AuxTriple && isSYCLNativeCPU(TC.getTriple(), *AuxTriple);
-}
 } // end namespace driver
 } // end namespace clang
 
