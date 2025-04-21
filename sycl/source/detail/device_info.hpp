@@ -208,11 +208,16 @@ device_impl::get_device_info_string(ur_device_info_t InfoCode) const {
   if (resultSize == 0) {
     return std::string();
   }
-  std::unique_ptr<char[]> result(new char[resultSize]);
+  std::string result;
+  // C++23's `resize_and_overwrite` would be better...
+  //
+  // UR counts null terminator in the size, std::string doesn't. Adjust by "-1"
+  // for that.
+  result.resize(resultSize - 1);
   getAdapter()->call<UrApiKind::urDeviceGetInfo>(
-      getHandleRef(), InfoCode, resultSize, result.get(), nullptr);
+      getHandleRef(), InfoCode, resultSize, result.data(), nullptr);
 
-  return std::string(result.get());
+  return result;
 }
 
 // Specialization for string return type, variable return size
@@ -220,12 +225,6 @@ template <typename Param> struct get_device_info_impl<std::string, Param> {
   static std::string get(const DeviceImplPtr &Dev) {
     return Dev->get_device_info_string(UrInfoCode<Param>::value);
   }
-};
-
-// Specialization for parent device
-template <typename ReturnT>
-struct get_device_info_impl<ReturnT, info::device::parent_device> {
-  static ReturnT get(const DeviceImplPtr &Dev);
 };
 
 // Specialization for fp_config types, checks the corresponding fp type support
@@ -243,14 +242,6 @@ struct get_device_info_impl<std::vector<info::fp_config>, Param> {
         Dev->getHandleRef(), UrInfoCode<Param>::value, sizeof(result), &result,
         nullptr);
     return read_fp_bitfield(result);
-  }
-};
-
-// Specialization for device version
-template <> struct get_device_info_impl<std::string, info::device::version> {
-  static std::string get(const DeviceImplPtr &Dev) {
-    return Dev->get_device_info_string(
-        UrInfoCode<info::device::version>::value);
   }
 };
 
