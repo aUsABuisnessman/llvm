@@ -21,3 +21,28 @@ jobs:
           include-body: 0
           sync-labels: 0
           enable-versioned-regex: 0
+
+version: 2
+updates:
+  # 1. Go - highest priority, most frequent updates
+  - package-ecosystem: "gomod"
+    directory: "/"                # Location of go.mod file
+    schedule:
+      interval: "daily"           # Most frequent
+    open-pull-requests-limit: 10
+
+  # 2. Python - less frequent
+  - package-ecosystem: "pip"
+    directory: "/"                # Location of requirements.txt or Pipfile
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+
+  # 3. GitHub Actions - even less frequent
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+
+  # 4. NPM, Maven, etc. - add more as needed, with lower frequency or limits
