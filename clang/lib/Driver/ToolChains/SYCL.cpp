@@ -248,16 +248,16 @@ void SYCL::constructLLVMForeachCommand(Compilation &C, const JobAction &JA,
         C.getArgs().MakeArgString("--out-dir=" + OutputDirName));
   }
 
-  // If fsycl-dump-device-code is passed, put the PTX files
-  // into the path provided in fsycl-dump-device-code.
+  // If save-offload-code is passed, put the PTX files
+  // into the path provided in save-offload-code.
   if (T->getToolChain().getTriple().isNVPTX() &&
-      C.getDriver().isDumpDeviceCodeEnabled() && Ext == "s") {
+      C.getDriver().isSaveOffloadCodeEnabled() && Ext == "s") {
     SmallString<128> OutputDir;
 
-    Arg *DumpDeviceCodeArg =
-        C.getArgs().getLastArg(options::OPT_fsycl_dump_device_code_EQ);
+    Arg *SaveOffloadCodeArg =
+        C.getArgs().getLastArg(options::OPT_save_offload_code_EQ);
 
-    OutputDir = (DumpDeviceCodeArg ? DumpDeviceCodeArg->getValue() : "");
+    OutputDir = (SaveOffloadCodeArg ? SaveOffloadCodeArg->getValue() : "");
 
     // If the output directory path is empty, put the PTX files in the
     // current directory.
@@ -603,7 +603,15 @@ SYCL::getDeviceLibraries(const Compilation &C, const llvm::Triple &TargetTriple,
       // For DG2, we just use libsycl-msan as placeholder.
       {"libsycl-msan", "internal"},
       {"libsycl-msan-pvc", "internal"}};
-  const SYCLDeviceLibsList SYCLDeviceTsanLibs = {{"libsycl-tsan", "internal"}};
+  const SYCLDeviceLibsList SYCLDeviceTsanLibs = {
+      {"libsycl-tsan", "internal"},
+      {"libsycl-tsan-cpu", "internal"},
+      // Currently, we only provide aot tsan libdevice for PVC and CPU.
+      // For DG2, we just use libsycl-tsan as placeholder.
+      // TODO: replace "libsycl-tsan" with "libsycl-tsan-dg2" when DG2
+      // AOT support is added.
+      {"libsycl-tsan", "internal"},
+      {"libsycl-tsan-pvc", "internal"}};
 #endif
 
   const SYCLDeviceLibsList SYCLNativeCpuDeviceLibs = {
@@ -759,7 +767,7 @@ SYCL::getDeviceLibraries(const Compilation &C, const llvm::Triple &TargetTriple,
   else if (SanitizeVal == "memory")
     addSingleLibrary(SYCLDeviceMsanLibs[sanitizer_lib_idx]);
   else if (SanitizeVal == "thread")
-    addLibraries(SYCLDeviceTsanLibs);
+    addSingleLibrary(SYCLDeviceTsanLibs[sanitizer_lib_idx]);
 #endif
 
   if (isSYCLNativeCPU(TargetTriple))
@@ -883,6 +891,8 @@ static llvm::SmallVector<StringRef, 16> SYCLDeviceLibList{
     "msan-pvc",
     "msan-cpu",
     "tsan",
+    "tsan-pvc",
+    "tsan-cpu",
 #endif
     "imf",
     "imf-fp64",
@@ -1240,9 +1250,11 @@ StringRef SYCL::gen::resolveGenDevice(StringRef DeviceName) {
           .Cases("intel_gpu_mtl_h", "intel_gpu_12_71_4", "mtl_h")
           .Cases("intel_gpu_arl_h", "intel_gpu_12_74_4", "arl_h")
           .Cases("intel_gpu_bmg_g21", "intel_gpu_20_1_4", "bmg_g21")
+          .Cases("intel_gpu_bmg_g31", "intel_gpu_20_2_0", "bmg_g31")
           .Cases("intel_gpu_lnl_m", "intel_gpu_20_4_4", "lnl_m")
           .Cases("intel_gpu_ptl_h", "intel_gpu_30_0_4", "ptl_h")
           .Cases("intel_gpu_ptl_u", "intel_gpu_30_1_1", "ptl_u")
+          .Cases("intel_gpu_wcl", "intel_gpu_30_3_0", "wcl")
           .Case("nvidia_gpu_sm_50", "sm_50")
           .Case("nvidia_gpu_sm_52", "sm_52")
           .Case("nvidia_gpu_sm_53", "sm_53")
@@ -1332,9 +1344,11 @@ SmallString<64> SYCL::gen::getGenDeviceMacro(StringRef DeviceName) {
                       .Case("mtl_h", "INTEL_GPU_MTL_H")
                       .Case("arl_h", "INTEL_GPU_ARL_H")
                       .Case("bmg_g21", "INTEL_GPU_BMG_G21")
+                      .Case("bmg_g31", "INTEL_GPU_BMG_G31")
                       .Case("lnl_m", "INTEL_GPU_LNL_M")
                       .Case("ptl_h", "INTEL_GPU_PTL_H")
                       .Case("ptl_u", "INTEL_GPU_PTL_U")
+                      .Case("wcl", "INTEL_GPU_WCL")
                       .Case("sm_50", "NVIDIA_GPU_SM_50")
                       .Case("sm_52", "NVIDIA_GPU_SM_52")
                       .Case("sm_53", "NVIDIA_GPU_SM_53")
@@ -1462,6 +1476,7 @@ static ArrayRef<options::ID> getUnsupportedOpts() {
       options::OPT_fprofile_instr_use_EQ, // -fprofile-instr-use
       options::OPT_fcs_profile_generate,  // -fcs-profile-generate
       options::OPT_fcs_profile_generate_EQ,
+      options::OPT_gline_tables_only, // -gline-tables-only
   };
   return UnsupportedOpts;
 }
@@ -1507,7 +1522,7 @@ SYCLToolChain::SYCLToolChain(const Driver &D, const llvm::Triple &Triple,
           continue;
       }
       D.Diag(clang::diag::warn_drv_unsupported_option_for_target)
-          << A->getAsString(Args) << getTriple().str();
+          << A->getAsString(Args) << getTriple().str() << 1;
     }
   }
 }

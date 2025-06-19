@@ -29,20 +29,12 @@ inline namespace _V1 {
 // Forward declaration
 class device;
 namespace detail {
-class context_impl {
-public:
-  /// Constructs a context_impl using a single SYCL devices.
-  ///
-  /// The constructed context_impl will use the AsyncHandler parameter to
-  /// handle exceptions.
-  /// PropList carries the properties of the constructed context_impl.
-  ///
-  /// \param Device is an instance of SYCL device.
-  /// \param AsyncHandler is an instance of async_handler.
-  /// \param PropList is an instance of property_list.
-  context_impl(const device &Device, async_handler AsyncHandler,
-               const property_list &PropList);
+class context_impl : public std::enable_shared_from_this<context_impl> {
+  struct private_tag {
+    explicit private_tag() = default;
+  };
 
+public:
   /// Constructs a context_impl using a list of SYCL devices.
   ///
   /// Newly created instance will save each SYCL device in the list. This
@@ -56,7 +48,8 @@ public:
   /// \param AsyncHandler is an instance of async_handler.
   /// \param PropList is an instance of property_list.
   context_impl(const std::vector<sycl::device> DeviceList,
-               async_handler AsyncHandler, const property_list &PropList);
+               async_handler AsyncHandler, const property_list &PropList,
+               private_tag);
 
   /// Construct a context_impl using plug-in interoperability handle.
   ///
@@ -70,8 +63,23 @@ public:
   /// transferred to runtime
   context_impl(ur_context_handle_t UrContext, async_handler AsyncHandler,
                const AdapterPtr &Adapter,
-               const std::vector<sycl::device> &DeviceList = {},
-               bool OwnedByRuntime = true);
+               const std::vector<sycl::device> &DeviceList, bool OwnedByRuntime,
+               private_tag);
+
+  context_impl(ur_context_handle_t UrContext, async_handler AsyncHandler,
+               const AdapterPtr &Adapter, private_tag tag)
+      : context_impl(UrContext, AsyncHandler, Adapter,
+                     std::vector<sycl::device>{},
+                     /*OwnedByRuntime*/ true, tag) {}
+
+  // Single variadic method works because all the ctors are expected to be
+  // "public" except the `private_tag` part restricting the creation to
+  // `std::shared_ptr` allocations.
+  template <typename... Ts>
+  static std::shared_ptr<context_impl> create(Ts &&...args) {
+    return std::make_shared<context_impl>(std::forward<Ts>(args)...,
+                                          private_tag{});
+  }
 
   ~context_impl();
 
@@ -150,33 +158,35 @@ public:
   KernelProgramCache &getKernelProgramCache() const;
 
   /// Returns true if and only if context contains the given device.
-  bool hasDevice(std::shared_ptr<detail::device_impl> Device) const;
+  bool hasDevice(const detail::device_impl &Device) const;
 
   /// Returns true if and only if the device can be used within this context.
   /// For OpenCL this is currently equivalent to hasDevice, for other backends
   /// it returns true if the device is either a member of the context or a
   /// descendant of a member.
-  bool isDeviceValid(DeviceImplPtr Device) {
-    while (!hasDevice(Device)) {
-      if (Device->isRootDevice()) {
-        if (Device->has(aspect::ext_oneapi_is_component)) {
+  bool isDeviceValid(detail::device_impl &Device) {
+    detail::device_impl *CurrDevice = &Device;
+    while (!hasDevice(*CurrDevice)) {
+      if (CurrDevice->isRootDevice()) {
+        if (CurrDevice->has(aspect::ext_oneapi_is_component)) {
           // Component devices should be implicitly usable in context created
           // for a composite device they belong to.
-          auto CompositeDevice = Device->get_info<
+          auto CompositeDevice = CurrDevice->get_info<
               ext::oneapi::experimental::info::device::composite_device>();
-          return hasDevice(detail::getSyclObjImpl(CompositeDevice));
+          return hasDevice(*detail::getSyclObjImpl(CompositeDevice));
         }
 
         return false;
-      } else if (Device->getBackend() == backend::opencl) {
+      } else if (CurrDevice->getBackend() == backend::opencl) {
         // OpenCL does not support using descendants of context members within
         // that context yet. We make the exception in case it supports
         // component/composite devices.
         // TODO remove once this limitation is lifted
         return false;
       }
-      Device = detail::getSyclObjImpl(
-          Device->get_info<info::device::parent_device>());
+      CurrDevice = detail::getSyclObjImpl(
+                       CurrDevice->get_info<info::device::parent_device>())
+                       .get();
     }
 
     return true;
@@ -190,7 +200,7 @@ public:
 
   /// Given a UR device, returns the matching shared_ptr<device_impl>
   /// within this context. May return nullptr if no match discovered.
-  DeviceImplPtr findMatchingDeviceImpl(ur_device_handle_t &DeviceUR) const;
+  device_impl *findMatchingDeviceImpl(ur_device_handle_t &DeviceUR) const;
 
   /// Gets the native handle of the SYCL context.
   ///
@@ -213,19 +223,18 @@ public:
 
   /// Initializes device globals for a program on the associated queue.
   std::vector<ur_event_handle_t>
-  initializeDeviceGlobals(ur_program_handle_t NativePrg,
-                          const std::shared_ptr<queue_impl> &QueueImpl);
+  initializeDeviceGlobals(ur_program_handle_t NativePrg, queue_impl &QueueImpl);
 
-  void memcpyToHostOnlyDeviceGlobal(
-      const std::shared_ptr<device_impl> &DeviceImpl,
-      const void *DeviceGlobalPtr, const void *Src, size_t DeviceGlobalTSize,
-      bool IsDeviceImageScoped, size_t NumBytes, size_t Offset);
+  void memcpyToHostOnlyDeviceGlobal(device_impl &DeviceImpl,
+                                    const void *DeviceGlobalPtr,
+                                    const void *Src, size_t DeviceGlobalTSize,
+                                    bool IsDeviceImageScoped, size_t NumBytes,
+                                    size_t Offset);
 
-  void
-  memcpyFromHostOnlyDeviceGlobal(const std::shared_ptr<device_impl> &DeviceImpl,
-                                 void *Dest, const void *DeviceGlobalPtr,
-                                 bool IsDeviceImageScoped, size_t NumBytes,
-                                 size_t Offset);
+  void memcpyFromHostOnlyDeviceGlobal(device_impl &DeviceImpl, void *Dest,
+                                      const void *DeviceGlobalPtr,
+                                      bool IsDeviceImageScoped, size_t NumBytes,
+                                      size_t Offset);
 
   /// Gets a program associated with a device global from the cache.
   std::optional<ur_program_handle_t>

@@ -9,6 +9,7 @@
 #include <detail/context_impl.hpp>
 #include <detail/context_info.hpp>
 #include <detail/event_info.hpp>
+#include <detail/memory_pool_impl.hpp>
 #include <detail/platform_impl.hpp>
 #include <detail/queue_impl.hpp>
 #include <sycl/detail/common.hpp>
@@ -16,6 +17,7 @@
 #include <sycl/device.hpp>
 #include <sycl/exception.hpp>
 #include <sycl/exception_list.hpp>
+#include <sycl/ext/oneapi/experimental/async_alloc/memory_pool.hpp>
 #include <sycl/info/info_desc.hpp>
 #include <sycl/platform.hpp>
 #include <sycl/property_list.hpp>
@@ -27,19 +29,9 @@ namespace sycl {
 inline namespace _V1 {
 namespace detail {
 
-context_impl::context_impl(const device &Device, async_handler AsyncHandler,
-                           const property_list &PropList)
-    : MOwnedByRuntime(true), MAsyncHandler(AsyncHandler), MDevices(1, Device),
-      MContext(nullptr),
-      MPlatform(detail::getSyclObjImpl(Device.get_platform())),
-      MPropList(PropList), MSupportBufferLocationByDevices(NotChecked) {
-  verifyProps(PropList);
-  MKernelProgramCache.setContextPtr(this);
-}
-
 context_impl::context_impl(const std::vector<sycl::device> Devices,
                            async_handler AsyncHandler,
-                           const property_list &PropList)
+                           const property_list &PropList, private_tag)
     : MOwnedByRuntime(true), MAsyncHandler(AsyncHandler), MDevices(Devices),
       MContext(nullptr),
       MPlatform(detail::getSyclObjImpl(MDevices[0].get_platform())),
@@ -72,7 +64,7 @@ context_impl::context_impl(ur_context_handle_t UrContext,
                            async_handler AsyncHandler,
                            const AdapterPtr &Adapter,
                            const std::vector<sycl::device> &DeviceList,
-                           bool OwnedByRuntime)
+                           bool OwnedByRuntime, private_tag)
     : MOwnedByRuntime(OwnedByRuntime), MAsyncHandler(AsyncHandler),
       MDevices(DeviceList), MContext(UrContext), MPlatform(),
       MSupportBufferLocationByDevices(NotChecked) {
@@ -284,19 +276,18 @@ KernelProgramCache &context_impl::getKernelProgramCache() const {
   return MKernelProgramCache;
 }
 
-bool context_impl::hasDevice(
-    std::shared_ptr<detail::device_impl> Device) const {
+bool context_impl::hasDevice(const detail::device_impl &Device) const {
   for (auto D : MDevices)
-    if (getSyclObjImpl(D) == Device)
+    if (getSyclObjImpl(D).get() == &Device)
       return true;
   return false;
 }
 
-DeviceImplPtr
+device_impl *
 context_impl::findMatchingDeviceImpl(ur_device_handle_t &DeviceUR) const {
   for (device D : MDevices)
     if (getSyclObjImpl(D)->getHandleRef() == DeviceUR)
-      return getSyclObjImpl(D);
+      return getSyclObjImpl(D).get();
 
   return nullptr;
 }
@@ -349,17 +340,17 @@ void context_impl::addDeviceGlobalInitializer(
   }
 }
 
-std::vector<ur_event_handle_t> context_impl::initializeDeviceGlobals(
-    ur_program_handle_t NativePrg,
-    const std::shared_ptr<queue_impl> &QueueImpl) {
+std::vector<ur_event_handle_t>
+context_impl::initializeDeviceGlobals(ur_program_handle_t NativePrg,
+                                      queue_impl &QueueImpl) {
   if (!MDeviceGlobalNotInitializedCnt.load(std::memory_order_acquire))
     return {};
 
   const AdapterPtr &Adapter = getAdapter();
-  const DeviceImplPtr &DeviceImpl = QueueImpl->getDeviceImplPtr();
+  device_impl &DeviceImpl = QueueImpl.getDeviceImpl();
   std::lock_guard<std::mutex> NativeProgramLock(MDeviceGlobalInitializersMutex);
   auto ImgIt = MDeviceGlobalInitializers.find(
-      std::make_pair(NativePrg, DeviceImpl->getHandleRef()));
+      std::make_pair(NativePrg, DeviceImpl.getHandleRef()));
   if (ImgIt == MDeviceGlobalInitializers.end() ||
       ImgIt->second.MDeviceGlobalsFullyInitialized)
     return {};
@@ -443,7 +434,7 @@ std::vector<ur_event_handle_t> context_impl::initializeDeviceGlobals(
       ur_event_handle_t InitEvent;
       void *const &USMPtr = DeviceGlobalUSM.getPtr();
       Adapter->call<UrApiKind::urEnqueueDeviceGlobalVariableWrite>(
-          QueueImpl->getHandleRef(), NativePrg,
+          QueueImpl.getHandleRef(), NativePrg,
           DeviceGlobalEntry->MUniqueId.c_str(), false, sizeof(void *), 0,
           &USMPtr, 0, nullptr, &InitEvent);
 
@@ -461,12 +452,12 @@ void context_impl::DeviceGlobalInitializer::ClearEvents(
 }
 
 void context_impl::memcpyToHostOnlyDeviceGlobal(
-    const std::shared_ptr<device_impl> &DeviceImpl, const void *DeviceGlobalPtr,
-    const void *Src, size_t DeviceGlobalTSize, bool IsDeviceImageScoped,
-    size_t NumBytes, size_t Offset) {
+    device_impl &DeviceImpl, const void *DeviceGlobalPtr, const void *Src,
+    size_t DeviceGlobalTSize, bool IsDeviceImageScoped, size_t NumBytes,
+    size_t Offset) {
   std::optional<ur_device_handle_t> KeyDevice = std::nullopt;
   if (IsDeviceImageScoped)
-    KeyDevice = DeviceImpl->getHandleRef();
+    KeyDevice = DeviceImpl.getHandleRef();
   auto Key = std::make_pair(DeviceGlobalPtr, KeyDevice);
 
   std::lock_guard<std::mutex> InitLock(MDeviceGlobalUnregisteredDataMutex);
@@ -483,13 +474,12 @@ void context_impl::memcpyToHostOnlyDeviceGlobal(
 }
 
 void context_impl::memcpyFromHostOnlyDeviceGlobal(
-    const std::shared_ptr<device_impl> &DeviceImpl, void *Dest,
-    const void *DeviceGlobalPtr, bool IsDeviceImageScoped, size_t NumBytes,
-    size_t Offset) {
+    device_impl &DeviceImpl, void *Dest, const void *DeviceGlobalPtr,
+    bool IsDeviceImageScoped, size_t NumBytes, size_t Offset) {
 
   std::optional<ur_device_handle_t> KeyDevice = std::nullopt;
   if (IsDeviceImageScoped)
-    KeyDevice = DeviceImpl->getHandleRef();
+    KeyDevice = DeviceImpl.getHandleRef();
   auto Key = std::make_pair(DeviceGlobalPtr, KeyDevice);
 
   std::lock_guard<std::mutex> InitLock(MDeviceGlobalUnregisteredDataMutex);
@@ -532,7 +522,7 @@ std::optional<ur_program_handle_t> context_impl::getProgramForDevImgs(
 
       auto KeyMappingsIt = KeyMap.find(OuterKey);
       assert(KeyMappingsIt != KeyMap.end());
-      auto CachedProgIt = Cache.find(KeyMappingsIt->second);
+      auto CachedProgIt = Cache.find((*KeyMappingsIt).second);
       assert(CachedProgIt != Cache.end());
       BuildRes = CachedProgIt->second;
     }
@@ -580,9 +570,8 @@ context_impl::get_default_memory_pool(const context &Context,
 
   assert(Kind == usm::alloc::device);
 
-  std::shared_ptr<sycl::detail::device_impl> DevImpl =
-      sycl::detail::getSyclObjImpl(Device);
-  ur_device_handle_t DeviceHandle = DevImpl->getHandleRef();
+  detail::device_impl &DevImpl = *detail::getSyclObjImpl(Device);
+  ur_device_handle_t DeviceHandle = DevImpl.getHandleRef();
   const sycl::detail::AdapterPtr &Adapter = this->getAdapter();
 
   // Check dev is already in our list of device pool pairs.
@@ -603,7 +592,7 @@ context_impl::get_default_memory_pool(const context &Context,
   auto MemPoolImplPtr = std::make_shared<
       sycl::ext::oneapi::experimental::detail::memory_pool_impl>(
       Context, Device, sycl::usm::alloc::device, PoolHandle,
-      true /*Default pool*/, property_list{});
+      true /*Default pool*/);
 
   // Hold onto a weak_ptr of the memory_pool_impl. Prevents circular
   // dependencies between the context_impl and memory_pool_impl.

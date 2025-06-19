@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "detail/queue_impl.hpp"
 #include <sycl/detail/cg_types.hpp>
 #include <sycl/detail/os_util.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
@@ -17,6 +18,7 @@
 #include <detail/accessor_impl.hpp>
 #include <detail/cg.hpp>
 #include <detail/event_impl.hpp>
+#include <detail/graph_memory_pool.hpp>
 #include <detail/host_task.hpp>
 #include <detail/kernel_impl.hpp>
 #include <detail/sycl_mem_obj_t.hpp>
@@ -73,6 +75,11 @@ inline node_type getNodeTypeFromCG(sycl::detail::CGType CGType) {
     return node_type::subgraph;
   case sycl::detail::CGType::EnqueueNativeCommand:
     return node_type::native_command;
+  case sycl::detail::CGType::AsyncAlloc:
+    return node_type::async_malloc;
+  case sycl::detail::CGType::AsyncFree:
+    return node_type::async_free;
+
   default:
     assert(false && "Invalid Graph Node Type");
     return node_type::empty;
@@ -281,7 +288,7 @@ public:
 
       return std::make_unique<sycl::detail::CGHostTask>(
           sycl::detail::CGHostTask(
-              std::move(HostTaskSPtr), CommandGroupPtr->MQueue,
+              std::move(HostTaskSPtr), CommandGroupPtr->MQueue.get(),
               CommandGroupPtr->MContext, std::move(NewArgs), std::move(Data),
               CommandGroupPtr->getType(), Loc));
     }
@@ -470,6 +477,21 @@ public:
 
     default:
       return false;
+    }
+  }
+
+  /// Returns true if this node should be enqueued to the backend, if not only
+  /// its dependencies are considered.
+  bool requiresEnqueue() const {
+    switch (MNodeType) {
+    case node_type::empty:
+    case node_type::ext_oneapi_barrier:
+    case node_type::async_malloc:
+    case node_type::async_free:
+      return false;
+
+    default:
+      return true;
     }
   }
 
@@ -713,6 +735,12 @@ private:
     case sycl::detail::CGType::EnqueueNativeCommand:
       Stream << "CGNativeCommand \\n";
       break;
+    case sycl::detail::CGType::AsyncAlloc:
+      Stream << "CGAsyncAlloc \\n";
+      break;
+    case sycl::detail::CGType::AsyncFree:
+      Stream << "CGAsyncFree \\n";
+      break;
     default:
       Stream << "Other \\n";
       break;
@@ -743,16 +771,28 @@ public:
   std::unordered_map<sycl::device, ur_exp_command_buffer_handle_t>
       MCommandBuffers;
   /// List of predecessors to this partition.
-  std::vector<std::shared_ptr<partition>> MPredecessors;
+  std::vector<partition *> MPredecessors;
+
+  /// List of successors to this partition.
+  std::vector<partition *> MSuccessors;
+
+  /// List of requirements for this partition.
+  std::vector<sycl::detail::AccessorImplHost *> MRequirements;
+
+  /// Storage for accessors which are used by this partition.
+  std::vector<AccessorImplPtr> MAccessors;
+
   /// True if the graph of this partition is a single path graph
   /// and in-order optmization can be applied on it.
   bool MIsInOrderGraph = false;
 
-  /// @return True if the partition contains a host task
-  bool isHostTask() const {
-    return (MRoots.size() && ((*MRoots.begin()).lock()->MCGType ==
-                              sycl::detail::CGType::CodeplayHostTask));
-  }
+  /// True if this partition contains only one node which is a host_task.
+  bool MIsHostTask = false;
+
+  // Submission event for the partition. Used during enqueue to define
+  // dependencies between this partition and its successors. This event is
+  // replaced every time the partition is executed.
+  EventImplPtr MEvent;
 
   /// Checks if the graph is single path, i.e. each node has a single successor.
   /// @return True if the graph is a single path
@@ -850,18 +890,12 @@ public:
   /// Add a queue to the set of queues which are currently recording to this
   /// graph.
   /// @param RecordingQueue Queue to add to set.
-  void
-  addQueue(const std::shared_ptr<sycl::detail::queue_impl> &RecordingQueue) {
-    MRecordingQueues.insert(RecordingQueue);
-  }
+  void addQueue(sycl::detail::queue_impl &RecordingQueue);
 
   /// Remove a queue from the set of queues which are currently recording to
   /// this graph.
   /// @param RecordingQueue Queue to remove from set.
-  void
-  removeQueue(const std::shared_ptr<sycl::detail::queue_impl> &RecordingQueue) {
-    MRecordingQueues.erase(RecordingQueue);
-  }
+  void removeQueue(sycl::detail::queue_impl &RecordingQueue);
 
   /// Remove all queues which are recording to this graph, also sets all queues
   /// cleared back to the executing state.
@@ -873,7 +907,7 @@ public:
   /// @param EventImpl Event to associate with a node in map.
   /// @param NodeImpl Node to associate with event in map.
   void addEventForNode(std::shared_ptr<sycl::detail::event_impl> EventImpl,
-                       std::shared_ptr<node_impl> NodeImpl) {
+                       const std::shared_ptr<node_impl> &NodeImpl) {
     if (!(EventImpl->hasCommandGraph()))
       EventImpl->setCommandGraph(shared_from_this());
     MEventsMap[EventImpl] = NodeImpl;
@@ -915,15 +949,44 @@ public:
         "No node in this graph is associated with this event");
   }
 
+  /// Find the nodes associated with a list of SYCL events. Throws if no node is
+  /// found for a given event.
+  /// @param Events Events to find nodes for.
+  /// @return A list of node counterparts for each event, in the same order.
+  std::vector<std::shared_ptr<node_impl>> getNodesForEvents(
+      const std::vector<std::shared_ptr<sycl::detail::event_impl>> &Events) {
+    std::vector<std::shared_ptr<node_impl>> NodeList{};
+    NodeList.reserve(Events.size());
+
+    ReadLock Lock(MMutex);
+
+    for (const auto &Event : Events) {
+      if (auto NodeFound = MEventsMap.find(Event);
+          NodeFound != std::end(MEventsMap)) {
+        NodeList.push_back(NodeFound->second);
+      } else {
+        throw sycl::exception(
+            sycl::make_error_code(errc::invalid),
+            "No node in this graph is associated with this event");
+      }
+    }
+
+    return NodeList;
+  }
+
   /// Query for the context tied to this graph.
   /// @return Context associated with graph.
   sycl::context getContext() const { return MContext; }
 
+  /// Query for the context impl tied to this graph.
+  /// @return shared_ptr ref for the context impl associated with graph.
+  const std::shared_ptr<sycl::detail::context_impl> &getContextImplPtr() const {
+    return sycl::detail::getSyclObjImpl(MContext);
+  }
+
   /// Query for the device_impl tied to this graph.
   /// @return device_impl shared ptr reference associated with graph.
-  const DeviceImplPtr &getDeviceImplPtr() const {
-    return getSyclObjImpl(MDevice);
-  }
+  device_impl &getDeviceImpl() const { return *getSyclObjImpl(MDevice); }
 
   /// Query for the device tied to this graph.
   /// @return Device associated with graph.
@@ -944,22 +1007,13 @@ public:
   /// @return Last node in this graph added from \p Queue recording, or empty
   /// shared pointer if none.
   std::shared_ptr<node_impl>
-  getLastInorderNode(std::shared_ptr<sycl::detail::queue_impl> Queue) {
-    std::weak_ptr<sycl::detail::queue_impl> QueueWeakPtr(Queue);
-    if (0 == MInorderQueueMap.count(QueueWeakPtr)) {
-      return {};
-    }
-    return MInorderQueueMap[QueueWeakPtr];
-  }
+  getLastInorderNode(sycl::detail::queue_impl *Queue);
 
   /// Track the last node added to this graph from an in-order queue.
   /// @param Queue In-order queue to register \p Node for.
   /// @param Node Last node that was added to this graph from \p Queue.
-  void setLastInorderNode(std::shared_ptr<sycl::detail::queue_impl> Queue,
-                          std::shared_ptr<node_impl> Node) {
-    std::weak_ptr<sycl::detail::queue_impl> QueueWeakPtr(Queue);
-    MInorderQueueMap[QueueWeakPtr] = Node;
-  }
+  void setLastInorderNode(sycl::detail::queue_impl &Queue,
+                          std::shared_ptr<node_impl> Node);
 
   /// Prints the contents of the graph to a text file in DOT format.
   /// @param FilePath Path to the output file.
@@ -1119,7 +1173,7 @@ public:
   /// Sets the Queue state to queue_state::recording. Adds the queue to the list
   /// of recording queues associated with this graph.
   /// @param[in] Queue The queue to be recorded from.
-  void beginRecording(std::shared_ptr<sycl::detail::queue_impl> Queue);
+  void beginRecording(sycl::detail::queue_impl &Queue);
 
   /// Store the last barrier node that was submitted to the queue.
   /// @param[in] Queue The queue the barrier was recorded from.
@@ -1138,6 +1192,39 @@ public:
   }
 
   unsigned long long getID() const { return MID; }
+
+  /// Get the memory pool used for graph-owned allocations.
+  graph_mem_pool &getMemPool() { return MGraphMemPool; }
+
+  /// Mark that an executable graph was created from this modifiable graph, used
+  /// for tracking live graphs for graph-owned allocations.
+  void markExecGraphCreated() { MExecGraphCount++; }
+
+  /// Mark that an executable graph created from this modifiable graph was
+  /// destroyed, used for tracking live graphs for graph-owned allocations.
+  void markExecGraphDestroyed() {
+    while (true) {
+      size_t CurrentVal = MExecGraphCount;
+      if (CurrentVal == 0) {
+        break;
+      }
+      if (MExecGraphCount.compare_exchange_strong(CurrentVal, CurrentVal - 1) ==
+          false) {
+        continue;
+      }
+    }
+  }
+
+  /// Get the number of unique executable graph instances currently alive for
+  /// this graph.
+  size_t getExecGraphCount() const { return MExecGraphCount; }
+
+  /// Resets the visited edges variable across all nodes in the graph to 0.
+  void resetNodeVisitedEdges() {
+    for (auto &Node : MNodeStorage) {
+      Node->MTotalVisitedEdges = 0;
+    }
+  }
 
 private:
   /// Check the graph for cycles by performing a depth-first search of the
@@ -1160,7 +1247,7 @@ private:
   /// added as a root node.
   /// @param Node The node to add deps for
   /// @param Deps List of dependent nodes
-  void addDepsToNode(std::shared_ptr<node_impl> Node,
+  void addDepsToNode(const std::shared_ptr<node_impl> &Node,
                      std::vector<std::shared_ptr<node_impl>> &Deps) {
     if (!Deps.empty()) {
       for (auto &N : Deps) {
@@ -1206,10 +1293,17 @@ private:
   std::map<std::weak_ptr<sycl::detail::queue_impl>, std::shared_ptr<node_impl>,
            std::owner_less<std::weak_ptr<sycl::detail::queue_impl>>>
       MBarrierDependencyMap;
+  /// Graph memory pool for handling graph-owned memory allocations for this
+  /// graph.
+  graph_mem_pool MGraphMemPool;
 
   unsigned long long MID;
   // Used for std::hash in order to create a unique hash for the instance.
   inline static std::atomic<unsigned long long> NextAvailableID = 0;
+
+  // The number of live executable graphs that have been created from this
+  // modifiable graph
+  std::atomic<size_t> MExecGraphCount = 0;
 };
 
 /// Class representing the implementation of command_graph<executable>.
@@ -1248,9 +1342,17 @@ public:
   /// execution.
   /// @param Queue Command-queue to schedule execution on.
   /// @param CGData Command-group data provided by the sycl::handler
-  /// @return Event associated with the execution of the graph.
-  sycl::event enqueue(const std::shared_ptr<sycl::detail::queue_impl> &Queue,
-                      sycl::detail::CG::StorageInitHelper CGData);
+  /// @param EventNeeded Whether an event signalling the completion of this
+  /// operation needs to be returned.
+  /// @return Returns an event if EventNeeded is true. Returns nullptr
+  /// otherwise.
+  EventImplPtr enqueue(sycl::detail::queue_impl &Queue,
+                       sycl::detail::CG::StorageInitHelper CGData,
+                       bool EventNeeded);
+
+  /// Iterates through all the nodes in the graph to build the list of
+  /// accessor requirements for the whole graph and for each partition.
+  void buildRequirements();
 
   /// Turns the internal graph representation into UR command-buffers for a
   /// device.
@@ -1284,13 +1386,17 @@ public:
     return MPartitions;
   }
 
+  /// Query whether the graph contains any host-task nodes.
+  /// @return True if the graph contains any host-task nodes. False otherwise.
+  bool containsHostTask() const { return MContainsHostTask; }
+
   /// Checks if the previous submissions of this graph have been completed
   /// This function checks the status of events associated to the previous graph
   /// submissions.
   /// @return true if all previous submissions have been completed, false
   /// otherwise.
   bool previousSubmissionCompleted() const {
-    for (auto Event : MExecutionEvents) {
+    for (auto Event : MSchedulerDependencies) {
       if (!Event->isCompleted()) {
         return false;
       }
@@ -1334,17 +1440,22 @@ public:
 
   unsigned long long getID() const { return MID; }
 
+  /// Do any work required during finalization to finalize graph-owned memory
+  /// allocations.
+  void finalizeMemoryAllocations() {
+    // This call allocates physical memory and maps all virtual device
+    // allocations
+    MGraphImpl->getMemPool().allocateAndMapAll();
+  }
+
 private:
   /// Create a command-group for the node and add it to command-buffer by going
   /// through the scheduler.
-  /// @param Ctx Context to use.
-  /// @param DeviceImpl Device associated with the enqueue.
   /// @param CommandBuffer Command-buffer to add node to as a command.
   /// @param Node The node being enqueued.
   /// @return UR sync point created for this node in the command-buffer.
   ur_exp_command_buffer_sync_point_t
-  enqueueNode(sycl::context Ctx, sycl::detail::DeviceImplPtr DeviceImpl,
-              ur_exp_command_buffer_handle_t CommandBuffer,
+  enqueueNode(ur_exp_command_buffer_handle_t CommandBuffer,
               std::shared_ptr<node_impl> Node);
 
   /// Enqueue a node directly to the command-buffer without going through the
@@ -1355,9 +1466,69 @@ private:
   /// @param Node The node being enqueued.
   /// @return UR sync point created for this node in the command-buffer.
   ur_exp_command_buffer_sync_point_t
-  enqueueNodeDirect(sycl::context Ctx, sycl::detail::DeviceImplPtr DeviceImpl,
+  enqueueNodeDirect(const sycl::context &Ctx,
+                    sycl::detail::device_impl &DeviceImpl,
                     ur_exp_command_buffer_handle_t CommandBuffer,
                     std::shared_ptr<node_impl> Node);
+
+  /// Enqueues a host-task partition (i.e. a partition that contains only a
+  /// single node and that node is a host-task).
+  /// @param Partition The partition to enqueue.
+  /// @param Queue Command-queue to schedule execution on.
+  /// @param CGData Command-group data used for initializing the host-task
+  /// command-group.
+  /// @param EventNeeded Whether an event signalling the completion of this
+  /// operation needs to be returned.
+  /// @return If EventNeeded is true returns the event resulting from enqueueing
+  /// the host-task through the scheduler. Returns nullptr otherwise.
+  EventImplPtr enqueueHostTaskPartition(
+      std::shared_ptr<partition> &Partition, sycl::detail::queue_impl &Queue,
+      sycl::detail::CG::StorageInitHelper CGData, bool EventNeeded);
+
+  /// Enqueues a graph partition that contains no host-tasks using the
+  /// scheduler.
+  /// @param Partition The partition to enqueue.
+  /// @param Queue Command-queue to schedule execution on.
+  /// @param CGData Command-group data used for initializing the command-buffer
+  /// command-group.
+  /// @param EventNeeded Whether an event signalling the completion of this
+  /// operation needs to be returned.
+  /// @return If EventNeeded is true returns the event resulting from enqueueing
+  /// the command-buffer through the scheduler. Returns nullptr otherwise.
+  EventImplPtr enqueuePartitionWithScheduler(
+      std::shared_ptr<partition> &Partition, sycl::detail::queue_impl &Queue,
+      sycl::detail::CG::StorageInitHelper CGData, bool EventNeeded);
+
+  /// Enqueues a graph partition that contains no host-tasks by directly calling
+  /// the unified-runtime API (i.e. avoids scheduler overhead).
+  /// @param Partition The partition to enqueue.
+  /// @param Queue Command-queue to schedule execution on.
+  /// @param WaitEvents List of events to wait on. All the events on this list
+  /// must be safe for scheduler bypass. Only events containing a valid UR event
+  /// handle will be waited for.
+  /// @param EventNeeded Whether an event signalling the completion of this
+  /// operation needs to be returned.
+  /// @return If EventNeeded is true returns the event resulting from enqueueing
+  /// the command-buffer. Returns nullptr otherwise.
+  EventImplPtr enqueuePartitionDirectly(
+      std::shared_ptr<partition> &Partition, sycl::detail::queue_impl &Queue,
+      std::vector<detail::EventImplPtr> &WaitEvents, bool EventNeeded);
+
+  /// Enqueues all the partitions in a graph.
+  /// @param Queue Command-queue to schedule execution on.
+  /// @param CGData Command-group data that contains the dependencies and
+  /// accessor requirements needed to enqueue this graph.
+  /// @param IsCGDataSafeForSchedulerBypass Whether CGData contains any events
+  /// that require enqueuing through the scheduler (e.g. requirements or
+  /// host-task events).
+  /// @param EventNeeded Whether an event signalling the completion of this
+  /// operation needs to be returned.
+  /// @return If EventNeeded is true returns the event resulting from enqueueing
+  /// the command-buffer. Returns nullptr otherwise.
+  EventImplPtr enqueuePartitions(sycl::detail::queue_impl &Queue,
+                                 sycl::detail::CG::StorageInitHelper &CGData,
+                                 bool IsCGDataSafeForSchedulerBypass,
+                                 bool EventNeeded);
 
   /// Iterates back through predecessors to find the real dependency.
   /// @param[out] Deps Found dependencies.
@@ -1419,8 +1590,7 @@ private:
   /// @param[out] NDRDesc ND-Range to update.
   /// @param[out] UpdateDesc Base struct in the pointer chain.
   void populateURKernelUpdateStructs(
-      const std::shared_ptr<node_impl> &Node,
-      std::pair<ur_program_handle_t, ur_kernel_handle_t> &BundleObjs,
+      const std::shared_ptr<node_impl> &Node, FastKernelCacheValPtr &BundleObjs,
       std::vector<ur_exp_command_buffer_update_memobj_arg_desc_t> &MemobjDescs,
       std::vector<ur_kernel_arg_mem_obj_properties_t> &MemobjProps,
       std::vector<ur_exp_command_buffer_update_pointer_arg_desc_t> &PtrDescs,
@@ -1442,6 +1612,8 @@ private:
   std::unordered_map<std::shared_ptr<node_impl>,
                      ur_exp_command_buffer_sync_point_t>
       MSyncPoints;
+  /// Sycl queue impl ptr associated with this graph.
+  std::shared_ptr<sycl::detail::queue_impl> MQueueImpl;
   /// Map of nodes in the exec graph to the partition number to which they
   /// belong.
   std::unordered_map<std::shared_ptr<node_impl>, int> MPartitionNodes;
@@ -1452,11 +1624,9 @@ private:
   /// List of requirements for enqueueing this command graph, accumulated from
   /// all nodes enqueued to the graph.
   std::vector<sycl::detail::AccessorImplHost *> MRequirements;
-  /// Storage for accessors which are used by this graph, accumulated from
-  /// all nodes enqueued to the graph.
-  std::vector<sycl::detail::AccessorImplPtr> MAccessors;
-  /// List of all execution events returned from command buffer enqueue calls.
-  std::vector<sycl::detail::EventImplPtr> MExecutionEvents;
+  /// List of dependencies that enqueue or update commands need to wait on
+  /// when using the scheduler path.
+  std::vector<sycl::detail::EventImplPtr> MSchedulerDependencies;
   /// List of the partitions that compose the exec graph.
   std::vector<std::shared_ptr<partition>> MPartitions;
   /// Storage for copies of nodes from the original modifiable graph.
@@ -1465,6 +1635,8 @@ private:
   std::unordered_map<std::shared_ptr<node_impl>,
                      ur_exp_command_buffer_command_handle_t>
       MCommandMap;
+  /// List of partition without any predecessors in this exec graph.
+  std::vector<std::weak_ptr<partition>> MRootPartitions;
   /// True if this graph can be updated (set with property::updatable)
   bool MIsUpdatable;
   /// If true, the graph profiling is enabled.
@@ -1485,23 +1657,19 @@ private:
 
 class dynamic_parameter_impl {
 public:
-  dynamic_parameter_impl(std::shared_ptr<graph_impl> GraphImpl)
-      : MGraph(GraphImpl),
-        MID(NextAvailableID.fetch_add(1, std::memory_order_relaxed)) {}
+  dynamic_parameter_impl()
+      : MID(NextAvailableID.fetch_add(1, std::memory_order_relaxed)) {}
 
-  dynamic_parameter_impl(std::shared_ptr<graph_impl> GraphImpl,
-                         size_t ParamSize, const void *Data)
-      : MGraph(GraphImpl), MValueStorage(ParamSize),
+  dynamic_parameter_impl(size_t ParamSize, const void *Data)
+      : MValueStorage(ParamSize),
         MID(NextAvailableID.fetch_add(1, std::memory_order_relaxed)) {
     std::memcpy(MValueStorage.data(), Data, ParamSize);
   }
 
   /// sycl_ext_oneapi_raw_kernel_arg constructor
   /// Parameter size is taken from member of raw_kernel_arg object.
-  dynamic_parameter_impl(std::shared_ptr<graph_impl> GraphImpl, size_t,
-                         raw_kernel_arg *Data)
-      : MGraph(GraphImpl),
-        MID(NextAvailableID.fetch_add(1, std::memory_order_relaxed)) {
+  dynamic_parameter_impl(size_t, raw_kernel_arg *Data)
+      : MID(NextAvailableID.fetch_add(1, std::memory_order_relaxed)) {
     size_t RawArgSize = Data->MArgSize;
     const void *RawArgData = Data->MArgData;
     MValueStorage.reserve(RawArgSize);
@@ -1556,22 +1724,6 @@ public:
   /// @param Acc The new accessor value
   void updateAccessor(const sycl::detail::AccessorBaseHost *Acc);
 
-  /// Update the internal value of this dynamic parameter as well as the value
-  /// of this parameter in all registered nodes and dynamic CGs. Should only be
-  /// called for dynamic_work_group_memory arguments parameter.
-  /// @param BufferSize The total size in bytes of the new work_group_memory
-  /// array
-  void updateWorkGroupMem(size_t BufferSize);
-
-  /// Static helper function for updating command-group
-  /// dynamic_work_group_memory arguments.
-  /// @param CG The command-group to update the argument information for.
-  /// @param ArgIndex The argument index to update.
-  /// @param BufferSize The total size in bytes of the new work_group_memory
-  /// array
-  static void updateCGWorkGroupMem(std::shared_ptr<sycl::detail::CG> CG,
-                                   int ArgIndex, size_t BufferSize);
-
   /// Static helper function for updating command-group value arguments.
   /// @param CG The command-group to update the argument information for.
   /// @param ArgIndex The argument index to update.
@@ -1594,14 +1746,64 @@ public:
   std::vector<std::pair<std::weak_ptr<node_impl>, int>> MNodes;
   // Dynamic command-groups which will be updated
   std::vector<DynamicCGInfo> MDynCGs;
-
-  std::weak_ptr<graph_impl> MGraph;
   std::vector<std::byte> MValueStorage;
 
 private:
   unsigned long long MID;
   // Used for std::hash in order to create a unique hash for the instance.
   inline static std::atomic<unsigned long long> NextAvailableID = 0;
+};
+
+class dynamic_work_group_memory_impl : public dynamic_parameter_impl {
+
+public:
+  dynamic_work_group_memory_impl(size_t BufferSizeInBytes)
+      : BufferSizeInBytes(BufferSizeInBytes) {}
+
+  virtual ~dynamic_work_group_memory_impl() = default;
+
+  /// Update the internal value of this dynamic parameter as well as the value
+  /// of this parameter in all registered nodes and dynamic CGs.
+  /// @param NewBufferSizeInBytes The total size in bytes of the new
+  /// work_group_memory array.
+  void updateWorkGroupMem(size_t NewBufferSizeInBytes);
+
+  /// Static helper function for updating command-group
+  /// dynamic_work_group_memory arguments.
+  /// @param CG The command-group to update the argument information for.
+  /// @param ArgIndex The argument index to update.
+  /// @param NewBufferSizeInBytes The total size in bytes of the new
+  /// work_group_memory array.
+  void updateCGWorkGroupMem(std::shared_ptr<sycl::detail::CG> &CG, int ArgIndex,
+                            size_t NewBufferSizeInBytes);
+
+  size_t BufferSizeInBytes;
+};
+
+class dynamic_local_accessor_impl : public dynamic_parameter_impl {
+
+public:
+  dynamic_local_accessor_impl(sycl::range<3> AllocationSize, int Dims,
+                              int ElemSize, const property_list &PropList);
+
+  virtual ~dynamic_local_accessor_impl() = default;
+
+  /// Update the internal value of this dynamic parameter as well as the value
+  /// of this parameter in all registered nodes and dynamic CGs.
+  /// @param NewAllocationSize The new allocation size for the
+  /// dynamic_local_accessor.
+  void updateLocalAccessor(range<3> NewAllocationSize);
+
+  /// Static helper function for updating command-group dynamic_local_accessor
+  /// arguments.
+  /// @param CG The command-group to update the argument information for.
+  /// @param ArgIndex The argument index to update.
+  /// @param NewAllocationSize The new allocation size for the
+  /// dynamic_local_accessor.
+  void updateCGLocalAccessor(std::shared_ptr<sycl::detail::CG> &CG,
+                             int ArgIndex, range<3> NewAllocationSize);
+
+  detail::LocalAccessorImplHost LAccImplHost;
 };
 
 class dynamic_command_group_impl

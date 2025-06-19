@@ -305,6 +305,28 @@ from the same dynamic command-group object. This allows the SYCL runtime to
 access the list of alternative kernels when calling the UR API to append a
 kernel command to a command-buffer.
 
+## Graph-Owned Memory Allocations
+### Device Allocations
+
+Device allocations for graphs are implemented using virtual memory. Allocation
+commands performing a virtual reservation for the provided size, and physical
+memory is created and mapped only during graph finalization. This allows valid
+device addresses to be returned immediately when building the graph without the
+penalty of doing any memory allocations during graph building, which could have
+a negative impact on features such as whole-graph update through increased
+overhead.
+
+### Behaviour of async_free
+
+`async_free` nodes are treated as hints rather than an actual memory free
+operation. This is because deallocating during graph execution is both
+undesirable for performance and not feasible with the current
+implementation/backends. Instead a free node represents a promise from the user
+that the memory is no longer in use. This enables optimizations such as
+potentially reusing that memory for subsequent allocation nodes in the graph.
+This allows us to reduce the total amount of concurrent memory required by a
+single graph.
+
 ## Optimizations
 ### Interactions with Profiling
 
@@ -326,6 +348,26 @@ This optimization is only performed in this very limited case where it can be
 safely assumed to be more performant. It is not likely we'll try to allow
 in-order execution in more scenarios through a complicated (and imperfect)
 heuristic but rather expose this as a hint the user can provide.
+
+### Graph Allocation Memory Reuse
+
+When adding a new allocation node to a graph, memory allocations which have
+previously been freed are checked to see if they can be reused. Because we have
+to return a pointer to the user immediately when the CGF for a node is
+processed, we have to do this eagerly anytime `async_malloc()` is called.
+Allocations track the last free node associated with them to represent the most
+recent use of that allocation.
+
+ To be reused, the two allocations must meet these criteria:
+
+- They must be of the same allocation type (device/host/shared).
+- They must have a matching size.
+- They must have the same properties (currently only read-only matters).
+- There must be a path from the last free node associated with a given
+  allocation to the new allocation node being added.
+
+If these criteria are met we update the last free node for the allocation and
+return the existing pointer to the user.
 
 ## Backend Implementation
 

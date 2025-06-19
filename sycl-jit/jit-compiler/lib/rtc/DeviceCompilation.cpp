@@ -178,8 +178,7 @@ public:
     assert(!hasExecuted() && "Action should only be invoked on a single file");
 
     // Create a compiler instance to handle the actual work.
-    CompilerInstance Compiler(std::move(PCHContainerOps));
-    Compiler.setInvocation(std::move(Invocation));
+    CompilerInstance Compiler(std::move(Invocation), std::move(PCHContainerOps));
     Compiler.setFileManager(Files);
     // Suppress summary with number of warnings and errors being printed to
     // stdout.
@@ -735,10 +734,12 @@ jit_compiler::performPostLink(ModuleUPtr Module,
                 [](Function *F) { return F->getName(); });
 
       // TODO: Determine what is requested.
-      GlobalBinImageProps PropReq{
-          /*EmitKernelParamInfo=*/true, /*EmitProgramMetadata=*/true,
-          /*EmitExportedSymbols=*/true, /*EmitImportedSymbols=*/true,
-          /*DeviceGlobals=*/true};
+      GlobalBinImageProps PropReq{/*EmitKernelParamInfo=*/true,
+                                  /*EmitProgramMetadata=*/true,
+                                  /*EmitKernelNames=*/true,
+                                  /*EmitExportedSymbols=*/true,
+                                  /*EmitImportedSymbols=*/true,
+                                  /*DeviceGlobals=*/true};
       PropertySetRegistry Properties =
           computeModuleProperties(MDesc.getModule(), MDesc.entries(), PropReq,
                                   AllowDeviceImageDependencies);

@@ -34,15 +34,15 @@ endif()
 if(NATIVECPU_USE_OCK)
   if(NATIVECPU_OCK_USE_FETCHCONTENT)
     set(OCK_GIT_INTERNAL_REPO "https://github.com/uxlfoundation/oneapi-construction-kit.git")
-    # commit ffef31717750d3f15bfd2f18d9cd7f4677fe9d3e
-    # Merge: 574307afde 0b00238554
+    # commit 007a4924129ef49ca8793631d28ae343f6ba6d24
+    # Merge: 0135b8d586 9ed4bddff1
     # Author: Harald van Dijk <harald.vandijk@codeplay.com>
-    # Date:   Fri Apr 4 16:26:38 2025 +0100
+    # Date:   Wed Jun 11 16:45:25 2025 +0100
     # 
-    #     Merge pull request #751 from hvdijk/llvm21-address-space
+    #     Merge pull request #864 from hvdijk/llvm21-createelementcount
     #     
-    #     [LLVM 21] Take address space into account for legality.
-    set(OCK_GIT_INTERNAL_TAG ffef31717750d3f15bfd2f18d9cd7f4677fe9d3e)
+    #     [LLVM 21] Remove VectorizationFactor, use CreateElementCount.
+    set(OCK_GIT_INTERNAL_TAG 007a4924129ef49ca8793631d28ae343f6ba6d24)
 
     # Overwrite OCK_GIT_INTERNAL_REPO/OCK_GIT_INTERNAL_TAG if the corresponding options are set
     if(OCK_GIT_REPO)
