@@ -14,8 +14,6 @@
 #include <detail/scheduler/commands.hpp>
 #include <sycl/sycl.hpp>
 
-#include <llvm/Support/PropertySetIO.h>
-
 #include <helpers/MockDeviceImage.hpp>
 #include <helpers/MockKernelInfo.hpp>
 #include <helpers/ScopedEnvVar.hpp>
@@ -84,8 +82,7 @@ static sycl::unittest::MockDeviceImage generateEAMTestKernelImage() {
   std::vector<MockProperty> ImgKPOI{std::move(EAMKernelPOI)};
 
   MockPropertySet PropSet;
-  PropSet.insert(llvm::util::PropertySetRegistry::SYCL_KERNEL_PARAM_OPT_INFO,
-                 std::move(ImgKPOI));
+  PropSet.insert(__SYCL_PROPERTY_SET_KERNEL_PARAM_OPT_INFO, std::move(ImgKPOI));
 
   std::vector<MockOffloadEntry> Entries = makeEmptyKernels({EAMTestKernelName});
 
@@ -104,8 +101,7 @@ static sycl::unittest::MockDeviceImage generateEAMTestKernel3Image() {
   std::vector<MockProperty> ImgKPOI{std::move(EAMKernelPOI)};
 
   MockPropertySet PropSet;
-  PropSet.insert(llvm::util::PropertySetRegistry::SYCL_KERNEL_PARAM_OPT_INFO,
-                 std::move(ImgKPOI));
+  PropSet.insert(__SYCL_PROPERTY_SET_KERNEL_PARAM_OPT_INFO, std::move(ImgKPOI));
 
   std::vector<MockOffloadEntry> Entries =
       makeEmptyKernels({EAMTestKernel3Name});
@@ -139,8 +135,8 @@ class MockHandler : public sycl::handler {
 public:
   using sycl::handler::impl;
 
-  MockHandler(std::shared_ptr<sycl::detail::queue_impl> Queue)
-      : sycl::handler(Queue, /*CallerNeedsEvent*/ true) {}
+  MockHandler(sycl::detail::queue_impl &Queue)
+      : sycl::handler(Queue.shared_from_this(), /*CallerNeedsEvent*/ true) {}
 
   std::unique_ptr<sycl::detail::CG> finalize() {
     auto CGH = static_cast<sycl::handler *>(this);
@@ -175,7 +171,7 @@ const sycl::detail::KernelArgMask *getKernelArgMaskFromBundle(
   EXPECT_FALSE(ExecBundle.empty()) << "Expect non-empty exec kernel bundle";
 
   // Emulating processing of command group function
-  MockHandler MockCGH(QueueImpl);
+  MockHandler MockCGH(*QueueImpl);
   MockCGH.use_kernel_bundle(ExecBundle);
   MockCGH.single_task<EAMTestKernel>([] {}); // Actual kernel does not matter
 
@@ -186,8 +182,8 @@ const sycl::detail::KernelArgMask *getKernelArgMaskFromBundle(
   EXPECT_TRUE(KernelBundleImplPtr)
       << "Expect command group to contain kernel bundle";
 
-  auto SyclKernelImpl = KernelBundleImplPtr->tryGetKernel(
-      ExecKernel->MKernelName, KernelBundleImplPtr);
+  auto SyclKernelImpl =
+      KernelBundleImplPtr->tryGetKernel(ExecKernel->MKernelName);
   EXPECT_TRUE(SyclKernelImpl != nullptr);
   std::shared_ptr<sycl::detail::device_image_impl> DeviceImageImpl =
       SyclKernelImpl->getDeviceImage();
@@ -307,7 +303,7 @@ TEST(EliminatedArgMask, ReuseOfHandleValues) {
     const sycl::device Dev = Plt.get_devices()[0];
     sycl::queue Queue{Dev};
     auto Ctx = Queue.get_context();
-    ProgBefore = PM.getBuiltURProgram(sycl::detail::getSyclObjImpl(Ctx),
+    ProgBefore = PM.getBuiltURProgram(*sycl::detail::getSyclObjImpl(Ctx),
                                       *sycl::detail::getSyclObjImpl(Dev), Name);
     auto Mask = PM.getEliminatedKernelArgMask(ProgBefore, Name);
     EXPECT_NE(Mask, nullptr);
@@ -332,7 +328,7 @@ TEST(EliminatedArgMask, ReuseOfHandleValues) {
     const sycl::device Dev = Plt.get_devices()[0];
     sycl::queue Queue{Dev};
     auto Ctx = Queue.get_context();
-    ProgAfter = PM.getBuiltURProgram(sycl::detail::getSyclObjImpl(Ctx),
+    ProgAfter = PM.getBuiltURProgram(*sycl::detail::getSyclObjImpl(Ctx),
                                      *sycl::detail::getSyclObjImpl(Dev), Name);
     auto Mask = PM.getEliminatedKernelArgMask(ProgAfter, Name);
     EXPECT_NE(Mask, nullptr);

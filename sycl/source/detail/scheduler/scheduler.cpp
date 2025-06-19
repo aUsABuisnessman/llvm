@@ -133,6 +133,14 @@ EventImplPtr Scheduler::addCG(
     }
     NewEvent = NewCmd->getEvent();
     NewEvent->setSubmissionTime();
+
+    // This is the last moment we can mark the event as discarded.
+    // Doing this during command execution would lead to incorrect
+    // event handling (as event would change it's state from non-discarded
+    // to discarded).
+    if (!EventNeeded) {
+      NewEvent->setStateDiscarded();
+    }
   }
 
   enqueueCommandForCG(NewEvent, AuxiliaryCmds);
@@ -188,9 +196,16 @@ void Scheduler::enqueueCommandForCG(EventImplPtr NewEvent,
       try {
         bool Enqueued = GraphProcessor::enqueueCommand(
             NewCmd, Lock, Res, ToCleanUp, NewCmd, Blocking);
-        if (!Enqueued && EnqueueResultT::SyclEnqueueFailed == Res.MResult)
-          throw exception(make_error_code(errc::runtime),
-                          "Enqueue process failed.");
+        if (!Enqueued && EnqueueResultT::SyclEnqueueFailed == Res.MResult) {
+          throw sycl::detail::set_ur_error(
+              sycl::exception(
+                  sycl::make_error_code(errc::runtime),
+                  std::string("Enqueue process failed.\n") +
+                      __SYCL_UR_ERROR_REPORT(
+                          NewCmd->getWorkerContext()->getBackend()) +
+                      sycl::detail::codeToString(Res.MErrCode)),
+              Res.MErrCode);
+        }
       } catch (...) {
         // enqueueCommand() func and if statement above may throw an exception,
         // so destroy required resources to avoid memory leak
@@ -610,7 +625,7 @@ void Scheduler::cleanupAuxiliaryResources(BlockingT Blocking) {
 }
 
 ur_kernel_handle_t Scheduler::completeSpecConstMaterialization(
-    [[maybe_unused]] const QueueImplPtr &Queue,
+    [[maybe_unused]] queue_impl &Queue,
     [[maybe_unused]] const RTDeviceBinaryImage *BinImage,
     [[maybe_unused]] KernelNameStrRefT KernelName,
     [[maybe_unused]] std::vector<unsigned char> &SpecConstBlob) {
@@ -671,8 +686,8 @@ EventImplPtr Scheduler::addCommandGraphUpdate(
   return NewCmdEvent;
 }
 
-bool CheckEventReadiness(const ContextImplPtr &Context,
-                         const EventImplPtr &SyclEventImplPtr) {
+bool Scheduler::CheckEventReadiness(context_impl &Context,
+                                    const EventImplPtr &SyclEventImplPtr) {
   // Events that don't have an initialized context are throwaway events that
   // don't represent actual dependencies. Calling getContextImpl() would set
   // their context, which we wish to avoid as it is expensive.
@@ -684,7 +699,7 @@ bool CheckEventReadiness(const ContextImplPtr &Context,
     return SyclEventImplPtr->isCompleted();
   }
   // Cross-context dependencies can't be passed to the backend directly.
-  if (SyclEventImplPtr->getContextImpl() != Context)
+  if (&SyclEventImplPtr->getContextImpl() != &Context)
     return false;
 
   // A nullptr here means that the commmand does not produce a UR event or it
@@ -693,7 +708,7 @@ bool CheckEventReadiness(const ContextImplPtr &Context,
 }
 
 bool Scheduler::areEventsSafeForSchedulerBypass(
-    const std::vector<sycl::event> &DepEvents, const ContextImplPtr &Context) {
+    const std::vector<sycl::event> &DepEvents, context_impl &Context) {
 
   return std::all_of(
       DepEvents.begin(), DepEvents.end(), [&Context](const sycl::event &Event) {
@@ -703,7 +718,7 @@ bool Scheduler::areEventsSafeForSchedulerBypass(
 }
 
 bool Scheduler::areEventsSafeForSchedulerBypass(
-    const std::vector<EventImplPtr> &DepEvents, const ContextImplPtr &Context) {
+    const std::vector<EventImplPtr> &DepEvents, context_impl &Context) {
 
   return std::all_of(DepEvents.begin(), DepEvents.end(),
                      [&Context](const EventImplPtr &SyclEventImplPtr) {
