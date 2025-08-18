@@ -11,6 +11,7 @@
 #ifndef UR_CUDA_ADAPTER_HPP_INCLUDED
 #define UR_CUDA_ADAPTER_HPP_INCLUDED
 
+#include "common/ur_ref_count.hpp"
 #include "logger/ur_logger.hpp"
 #include "platform.hpp"
 #include "tracing.hpp"
@@ -19,8 +20,8 @@
 #include <atomic>
 #include <memory>
 
-struct ur_adapter_handle_t_ {
-  std::atomic<uint32_t> RefCount = 0;
+struct ur_adapter_handle_t_ : ur::cuda::handle_base {
+  ur::RefCount RefCount;
   struct cuda_tracing_context_t_ *TracingCtx = nullptr;
   logger::Logger &logger;
   std::unique_ptr<ur_platform_handle_t_> Platform;

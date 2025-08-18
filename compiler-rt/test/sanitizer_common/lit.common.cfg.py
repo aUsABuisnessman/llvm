@@ -87,7 +87,7 @@ config.substitutions.append(("%collect_stack_traces", collect_stack_traces))
 config.substitutions.append(("%tool_name", config.tool_name))
 config.substitutions.append(("%tool_options", tool_options))
 config.substitutions.append(
-    ("%env_tool_opts=", "env " + tool_options + "=" + default_tool_options_str)
+    ("%env_tool_opts=", "%env " + tool_options + "=" + default_tool_options_str)
 )
 
 config.suffixes = [".c", ".cpp"]
@@ -103,3 +103,15 @@ if config.host_os == "NetBSD":
 
 if os.path.exists("/etc/services"):
     config.available_features.add("netbase")
+
+# Add detection for 5-level paging, some testes may fail with that.
+# LA57 is the control register flag name for 5-level paging.
+import subprocess
+
+cmd = subprocess.Popen(
+    "lscpu | grep la57", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
+cmd_stdout, _ = cmd.communicate()
+have_la57 = cmd_stdout.strip()
+if len(have_la57) > 0:
+    config.available_features.add("la57")

@@ -69,6 +69,10 @@ def override_image : Joined<["--"], "override-image=">,
   Flags<[WrapperOnlyOption]>, MetaVarName<"<kind=file>">,
   HelpText<"Uses the provided file as if it were the output of the device link step">;
 
+def should_extract : CommaJoined<["--"], "should-extract=">,
+  Flags<[WrapperOnlyOption]>, MetaVarName<"<kind=file>">,
+  HelpText<"Set of device architectures we should always extract if found.">;
+
 // Flags passed to the device linker.
 def arch_EQ : Joined<["--"], "arch=">,
   Flags<[DeviceOnlyOption, HelpHidden]>, MetaVarName<"<arch>">,
@@ -228,6 +232,11 @@ Flags<[WrapperOnlyOption]>,  HelpText<"Link SYCL device code using thinLTO">;
 def sycl_embed_ir : Flag<["--", "-"], "sycl-embed-ir">,
 Flags<[WrapperOnlyOption]>,  HelpText<"Embed LLVM IR for runtime kernel fusion">;
 
+def sycl_device_link
+    : Flag<["--", "-"], "sycl-device-link">,
+      Flags<[WrapperOnlyOption]>,
+      HelpText<"Link SYCL device code only. Discard host code.">;
+
 def sycl_dump_device_code_EQ : Joined<["--", "-"], "sycl-dump-device-code=">,
   Flags<[WrapperOnlyOption]>,
   HelpText<"Directory to dump offloading images to.">;
@@ -238,6 +247,6 @@ def sycl_allow_device_image_dependencies : Flag<["--", "-"], "sycl-allow-device-
   HelpText<"Allow dependencies between device code images">;
 
 // Options to force the output to be of the SYCLBIN format.
-def syclbin : Flag<["--", "-"], "syclbin">,
+def syclbin_EQ : Joined<["--", "-"], "syclbin=">,
   Flags<[WrapperOnlyOption]>,
-  HelpText<"Output in the SYCLBIN binary format">;
+  HelpText<"Output in the SYCLBIN binary format in the state specified by <arg> (input, object or executable)">;

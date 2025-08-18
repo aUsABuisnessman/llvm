@@ -1,8 +1,7 @@
 // REQUIRES: level_zero, level_zero_dev_kit
-// L0 adapter incorrectly reports memory leaks because it doesn't take into
-// account direct calls to L0 API.
 // UNSUPPORTED: ze_debug
-// UNSUPPORTED-TRACKER: https://github.com/intel/llvm/issues/18299
+// UNSUPPORTED-INTENDED: Leaks detection is done at UR level and doesn't account
+// for native L0 API calls.
 // UNSUPPORTED: linux && gpu-intel-dg2 && run-mode && !igc-dev
 // UNSUPPORTED-TRACKER: https://github.com/intel/llvm/issues/18273
 // RUN: %{build} %level_zero_options -o %t.out
@@ -35,11 +34,12 @@ int main() {
       return 0;
     }
 
-    // Initialize Level Zero driver is required if this test is linked
-    // statically with Level Zero loader, the driver will not be init otherwise.
+    // Initializing Level Zero driver is required if this test is linked
+    // statically with Level Zero loader, otherwise the driver will not be
+    // initialized.
     ze_result_t result = zeInit(ZE_INIT_FLAG_GPU_ONLY);
     if (result != ZE_RESULT_SUCCESS) {
-      std::cout << "zeInit failed\n";
+      std::cout << "zeInit failed with error code: " << result << std::endl;
       return 1;
     }
 

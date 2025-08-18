@@ -11,9 +11,10 @@
 #include "llvm/Support/Signals.h"
 #endif
 
-#include <detail/adapter.hpp>
+#include <detail/adapter_impl.hpp>
 #include <detail/config.hpp>
 #include <detail/global_handler.hpp>
+#include <detail/kernel_name_based_cache_t.hpp>
 #include <detail/platform_impl.hpp>
 #include <detail/program_manager/program_manager.hpp>
 #include <detail/scheduler/scheduler.hpp>
@@ -37,7 +38,7 @@ using LockGuard = std::lock_guard<SpinLock>;
 SpinLock GlobalHandler::MSyclGlobalHandlerProtector{};
 
 // forward decl
-void shutdown_early();
+void shutdown_early(bool);
 void shutdown_late();
 #ifdef _WIN32
 BOOL isLinkedStatically();
@@ -133,6 +134,10 @@ GlobalHandler &GlobalHandler::instance() {
   return *RTGlobalObjHandler;
 }
 
+bool GlobalHandler::isInstanceAlive() {
+  return GlobalHandler::getInstancePtr();
+}
+
 template <typename T, typename... Types>
 T &GlobalHandler::getOrCreate(InstWithLock<T> &IWL, Types &&...Args) {
   const LockGuard Lock{IWL.Lock};
@@ -184,7 +189,7 @@ ProgramManager &GlobalHandler::getProgramManager() {
   return PM;
 }
 
-std::unordered_map<platform_impl *, ContextImplPtr> &
+std::unordered_map<platform_impl *, std::shared_ptr<context_impl>> &
 GlobalHandler::getPlatformToDefaultContextCache() {
   // The optimization with static reference is not done because
   // there are public methods of the GlobalHandler
@@ -211,14 +216,6 @@ std::vector<std::shared_ptr<platform_impl>> &GlobalHandler::getPlatformCache() {
   return PlatformCache;
 }
 
-void GlobalHandler::clearPlatforms() {
-  if (!MPlatformCache.Inst)
-    return;
-  for (auto &PltSmartPtr : *MPlatformCache.Inst)
-    PltSmartPtr->MDevices.clear();
-  MPlatformCache.Inst->clear();
-}
-
 std::mutex &GlobalHandler::getPlatformMapMutex() {
   static std::mutex &PlatformMapMutex = getOrCreate(MPlatformMapMutex);
   return PlatformMapMutex;
@@ -229,8 +226,8 @@ std::mutex &GlobalHandler::getFilterMutex() {
   return FilterMutex;
 }
 
-std::vector<AdapterPtr> &GlobalHandler::getAdapters() {
-  static std::vector<AdapterPtr> &adapters = getOrCreate(MAdapters);
+std::vector<adapter_impl *> &GlobalHandler::getAdapters() {
+  static std::vector<adapter_impl *> &adapters = getOrCreate(MAdapters);
   enableOnCrashStackPrinting();
   return adapters;
 }
@@ -252,6 +249,13 @@ ThreadPool &GlobalHandler::getHostTaskThreadPool() {
   return TP;
 }
 
+KernelNameBasedCacheT *GlobalHandler::createKernelNameBasedCache() {
+  static std::deque<KernelNameBasedCacheT> &KernelNameBasedCaches =
+      getOrCreate(MKernelNameBasedCaches);
+  LockGuard LG{MKernelNameBasedCaches.Lock};
+  return &KernelNameBasedCaches.emplace_back();
+}
+
 void GlobalHandler::releaseDefaultContexts() {
   // Release shared-pointers to SYCL objects.
   // Note that on Windows the destruction of the default context
@@ -268,19 +272,21 @@ void GlobalHandler::releaseDefaultContexts() {
 // For Linux, early shutdown is here, and late shutdown is called from
 // a low priority destructor.
 struct StaticVarShutdownHandler {
-
+  StaticVarShutdownHandler(const StaticVarShutdownHandler &) = delete;
+  StaticVarShutdownHandler &
+  operator=(const StaticVarShutdownHandler &) = delete;
   ~StaticVarShutdownHandler() {
     try {
 #ifdef _WIN32
       // If statically linked, DllMain will not be called. So we do its work
       // here.
       if (isLinkedStatically()) {
-        shutdown_early();
+        shutdown_early(true);
       }
 
       shutdown_late();
 #else
-      shutdown_early();
+      shutdown_early(true);
 #endif
     } catch (std::exception &e) {
       __SYCL_REPORT_EXCEPTION_TO_STREAM(
@@ -306,6 +312,7 @@ void GlobalHandler::unloadAdapters() {
   if (MAdapters.Inst) {
     for (const auto &Adapter : getAdapters()) {
       Adapter->release();
+      delete Adapter;
     }
   }
 
@@ -334,7 +341,10 @@ void GlobalHandler::drainThreadPool() {
     MHostTaskThreadPool.Inst->drain();
 }
 
-void shutdown_early() {
+// Note: this function can be called on Windows twice:
+//  1) when library is unloaded via FreeLibrary
+//  2) when process is being terminated
+void shutdown_early(bool CanJoinThreads = true) {
   const LockGuard Lock{GlobalHandler::MSyclGlobalHandlerProtector};
   GlobalHandler *&Handler = GlobalHandler::getInstancePtr();
   if (!Handler)
@@ -353,8 +363,10 @@ void shutdown_early() {
   // upon its release
   Handler->prepareSchedulerToRelease(true);
 
-  if (Handler->MHostTaskThreadPool.Inst)
-    Handler->MHostTaskThreadPool.Inst->finishAndWait();
+  if (Handler->MHostTaskThreadPool.Inst) {
+    Handler->MHostTaskThreadPool.Inst->finishAndWait(CanJoinThreads);
+    Handler->MHostTaskThreadPool.Inst.reset(nullptr);
+  }
 
   // This releases OUR reference to the default context, but
   // other may yet have refs
@@ -374,10 +386,13 @@ void shutdown_late() {
 #endif
 
   // First, release resources, that may access adapters.
-  Handler->clearPlatforms(); // includes dropping platforms' devices ownership.
   Handler->MPlatformCache.Inst.reset(nullptr);
   Handler->MScheduler.Inst.reset(nullptr);
   Handler->MProgramManager.Inst.reset(nullptr);
+
+  // Cache stores handles to the adapter, so clear it before
+  // releasing adapters.
+  Handler->MKernelNameBasedCaches.Inst.reset(nullptr);
 
   // Clear the adapters and reset the instance if it was there.
   Handler->unloadAdapters();
@@ -411,7 +426,14 @@ extern "C" __SYCL_EXPORT BOOL WINAPI DllMain(HINSTANCE hinstDLL,
       std::cout << "---> DLL_PROCESS_DETACH syclx.dll\n" << std::endl;
 
     try {
-      shutdown_early();
+      // WA for threads handling. We must call join() or detach() on host task
+      // execution thread to avoid UB. lpReserved == NULL if library is unloaded
+      // via FreeLibrary. In this case we can't join threads within DllMain call
+      // due to global loader lock and DLL_THREAD_DETACH signalling. lpReserved
+      // != NULL if library is unloaded during process termination. In this case
+      // Windows terminates threads but leave them in signalled state, prevents
+      // DLL_THREAD_DETACH notification and we can call join() as NOP.
+      shutdown_early(lpReserved != NULL);
     } catch (std::exception &e) {
       __SYCL_REPORT_EXCEPTION_TO_STREAM("exception in DLL_PROCESS_DETACH", e);
       return FALSE;

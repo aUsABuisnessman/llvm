@@ -7,6 +7,11 @@
 //===-----------------------------------------------------------------===//
 #pragma once
 
+// Include symbols for beta extensions
+#ifndef CL_ENABLE_BETA_EXTENSIONS
+#define CL_ENABLE_BETA_EXTENSIONS
+#endif
+
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <climits>
@@ -157,6 +162,13 @@ extern thread_local char ErrorMessage[MaxMessageSize];
 [[maybe_unused]] void setErrorMessage(const char *Message, int32_t ErrorCode);
 } // namespace cl_adapter
 
+namespace ur::opencl {
+struct ddi_getter {
+  const static ur_dditable_t *value();
+};
+using handle_base = ur::handle_base<ur::opencl::ddi_getter>;
+} // namespace ur::opencl
+
 namespace cl_ext {
 // Older versions of GCC don't like "const" here
 #if defined(__GNUC__) && (__GNUC__ < 7 || (__GNU__C == 7 && __GNUC_MINOR__ < 2))
@@ -175,6 +187,7 @@ CONSTFIX char CreateBufferWithPropertiesName[] =
 CONSTFIX char SetKernelArgMemPointerName[] = "clSetKernelArgMemPointerINTEL";
 CONSTFIX char EnqueueMemFillName[] = "clEnqueueMemFillINTEL";
 CONSTFIX char EnqueueMemcpyName[] = "clEnqueueMemcpyINTEL";
+CONSTFIX char EnqueueMigrateMemName[] = "clEnqueueMigrateMemINTEL";
 CONSTFIX char GetMemAllocInfoName[] = "clGetMemAllocInfoINTEL";
 CONSTFIX char SetProgramSpecializationConstantName[] =
     "clSetProgramSpecializationConstant";

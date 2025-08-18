@@ -25,7 +25,7 @@ namespace fs = filesystem;
 namespace ur_loader {
 
 struct ur_device_tuple {
-  ur_adapter_backend_t backend;
+  ur_backend_t backend;
   ur_device_type_t device;
 };
 
@@ -34,15 +34,16 @@ struct FilterTerm {
   std::string backend;
   std::vector<std::string> devices;
 
-  const std::map<std::string, ur_adapter_backend_t> backendNameMap = {
-      {"opencl", UR_ADAPTER_BACKEND_OPENCL},
-      {"level_zero", UR_ADAPTER_BACKEND_LEVEL_ZERO},
-      {"cuda", UR_ADAPTER_BACKEND_CUDA},
-      {"hip", UR_ADAPTER_BACKEND_HIP},
-      {"native_cpu", UR_ADAPTER_BACKEND_NATIVE_CPU},
+  const std::map<std::string, ur_backend_t> backendNameMap = {
+      {"opencl", UR_BACKEND_OPENCL},
+      {"level_zero", UR_BACKEND_LEVEL_ZERO},
+      {"cuda", UR_BACKEND_CUDA},
+      {"hip", UR_BACKEND_HIP},
+      {"native_cpu", UR_BACKEND_NATIVE_CPU},
+      {"offload", UR_BACKEND_OFFLOAD},
   };
 
-  bool matchesBackend(const ur_adapter_backend_t &match_backend) const {
+  bool matchesBackend(const ur_backend_t &match_backend) const {
     if (backend.front() == '*') {
       return true;
     }
@@ -354,22 +355,6 @@ private:
     }
 
     for (const auto &adapterName : adapterNames) {
-      // Skip legacy L0 adapter if the v2 adapter is requested, and vice versa.
-      if (std::string(adapterName).find("level_zero") != std::string::npos) {
-        auto v2Requested = getenv_tobool("UR_LOADER_USE_LEVEL_ZERO_V2", false);
-        v2Requested |= getenv_tobool("SYCL_UR_USE_LEVEL_ZERO_V2", false);
-        auto v2Adapter =
-            std::string(adapterName).find("v2") != std::string::npos;
-
-        if (v2Requested != v2Adapter) {
-          UR_LOG(INFO, "The adapter '{}' is skipped because {} {}.",
-                 adapterName,
-                 "UR_LOADER_USE_LEVEL_ZERO_V2 or SYCL_UR_USE_LEVEL_ZERO_V2",
-                 v2Requested ? "is set" : "is not set");
-          continue;
-        }
-      }
-
       std::vector<fs::path> loadPaths;
 
       // Adapter search order:

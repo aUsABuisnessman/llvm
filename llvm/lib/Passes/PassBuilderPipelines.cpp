@@ -24,7 +24,6 @@
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
-#include "llvm/CodeGen/GlobalMergeFunctions.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/Passes/OptimizationLevel.h"
@@ -77,7 +76,8 @@
 #include "llvm/Transforms/Instrumentation/CGProfile.h"
 #include "llvm/Transforms/Instrumentation/ControlHeightReduction.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
-#include "llvm/Transforms/Instrumentation/MemProfiler.h"
+#include "llvm/Transforms/Instrumentation/MemProfInstrumentation.h"
+#include "llvm/Transforms/Instrumentation/MemProfUse.h"
 #include "llvm/Transforms/Instrumentation/PGOCtxProfFlattening.h"
 #include "llvm/Transforms/Instrumentation/PGOCtxProfLowering.h"
 #include "llvm/Transforms/Instrumentation/PGOForceFunctionAttrs.h"
@@ -511,20 +511,16 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
 
     LPM2.addPass(LoopDeletionPass());
 
-    if (PTO.LoopInterchange)
-      LPM2.addPass(LoopInterchangePass());
-
-    // Do not enable unrolling in PreLinkThinLTO phase during sample PGO
-    // because it changes IR to makes profile annotation in back compile
-    // inaccurate. The normal unroller doesn't pay attention to forced full
-    // unroll attributes so we need to make sure and allow the full unroll pass
-    // to pay attention to it.
-    if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink || !PGOOpt ||
-        PGOOpt->Action != PGOOptions::SampleUse)
-      LPM2.addPass(LoopFullUnrollPass(Level.getSpeedupLevel(),
-                                      /* OnlyWhenForced= */ !PTO.LoopUnrolling,
-                                      PTO.ForgetAllSCEVInLoopUnroll));
-
+  // Do not enable unrolling in PreLinkThinLTO phase during sample PGO
+  // because it changes IR to makes profile annotation in back compile
+  // inaccurate. The normal unroller doesn't pay attention to forced full unroll
+  // attributes so we need to make sure and allow the full unroll pass to pay
+  // attention to it.
+  if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink || !PGOOpt ||
+      PGOOpt->Action != PGOOptions::SampleUse)
+    LPM2.addPass(LoopFullUnrollPass(Level.getSpeedupLevel(),
+                                    /* OnlyWhenForced= */ !PTO.LoopUnrolling,
+                                    PTO.ForgetAllSCEVInLoopUnroll));
     invokeLoopOptimizerEndEPCallbacks(LPM2, Level);
 
     FPM.addPass(
@@ -640,7 +636,8 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
       !Level.isOptimizingForSize())
     FPM.addPass(PGOMemOPSizeOpt());
 
-  FPM.addPass(TailCallElimPass());
+  FPM.addPass(TailCallElimPass(/*UpdateFunctionEntryCount=*/
+                               isInstrumentedPGOUse()));
   FPM.addPass(
       SimplifyCFGPass(SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
 
@@ -709,19 +706,16 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
 
     LPM2.addPass(LoopDeletionPass());
 
-    if (PTO.LoopInterchange)
-      LPM2.addPass(LoopInterchangePass());
-
-    // Do not enable unrolling in PreLinkThinLTO phase during sample PGO
-    // because it changes IR to makes profile annotation in back compile
-    // inaccurate. The normal unroller doesn't pay attention to forced full
-    // unroll attributes so we need to make sure and allow the full unroll pass
-    // to pay attention to it.
-    if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink || !PGOOpt ||
-        PGOOpt->Action != PGOOptions::SampleUse)
-      LPM2.addPass(LoopFullUnrollPass(Level.getSpeedupLevel(),
-                                      /* OnlyWhenForced= */ !PTO.LoopUnrolling,
-                                      PTO.ForgetAllSCEVInLoopUnroll));
+  // Do not enable unrolling in PreLinkThinLTO phase during sample PGO
+  // because it changes IR to makes profile annotation in back compile
+  // inaccurate. The normal unroller doesn't pay attention to forced full unroll
+  // attributes so we need to make sure and allow the full unroll pass to pay
+  // attention to it.
+  if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink || !PGOOpt ||
+      PGOOpt->Action != PGOOptions::SampleUse)
+    LPM2.addPass(LoopFullUnrollPass(Level.getSpeedupLevel(),
+                                    /* OnlyWhenForced= */ !PTO.LoopUnrolling,
+                                    PTO.ForgetAllSCEVInLoopUnroll));
 
     invokeLoopOptimizerEndEPCallbacks(LPM2, Level);
 
@@ -949,14 +943,14 @@ PassBuilder::buildInlinerPipeline(OptimizationLevel Level,
     IP = getInlineParamsFromOptLevel(Level);
   else
     IP = getInlineParams(PTO.InlinerThreshold);
-  // For PreLinkThinLTO + SamplePGO, set hot-caller threshold to 0 to
-  // disable hot callsite inline (as much as possible [1]) because it makes
+  // For PreLinkThinLTO + SamplePGO or PreLinkFullLTO + SamplePGO,
+  // set hot-caller threshold to 0 to disable hot
+  // callsite inline (as much as possible [1]) because it makes
   // profile annotation in the backend inaccurate.
   //
   // [1] Note the cost of a function could be below zero due to erased
   // prologue / epilogue.
-  if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink && PGOOpt &&
-      PGOOpt->Action == PGOOptions::SampleUse)
+  if (isLTOPreLink(Phase) && PGOOpt && PGOOpt->Action == PGOOptions::SampleUse)
     IP.HotCallSiteThreshold = 0;
 
   if (PGOOpt)
@@ -1046,14 +1040,14 @@ PassBuilder::buildModuleInlinerPipeline(OptimizationLevel Level,
   ModulePassManager MPM;
 
   InlineParams IP = getInlineParamsFromOptLevel(Level);
-  // For PreLinkThinLTO + SamplePGO, set hot-caller threshold to 0 to
-  // disable hot callsite inline (as much as possible [1]) because it makes
+  // For PreLinkThinLTO + SamplePGO or PreLinkFullLTO + SamplePGO,
+  // set hot-caller threshold to 0 to disable hot
+  // callsite inline (as much as possible [1]) because it makes
   // profile annotation in the backend inaccurate.
   //
   // [1] Note the cost of a function could be below zero due to erased
   // prologue / epilogue.
-  if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink && PGOOpt &&
-      PGOOpt->Action == PGOOptions::SampleUse)
+  if (isLTOPreLink(Phase) && PGOOpt && PGOOpt->Action == PGOOptions::SampleUse)
     IP.HotCallSiteThreshold = 0;
 
   if (PGOOpt)
@@ -1071,7 +1065,7 @@ PassBuilder::buildModuleInlinerPipeline(OptimizationLevel Level,
   if (!UseCtxProfile.empty() && Phase == ThinOrFullLTOPhase::ThinLTOPostLink) {
     MPM.addPass(GlobalOptPass());
     MPM.addPass(GlobalDCEPass());
-    MPM.addPass(PGOCtxProfFlatteningPass());
+    MPM.addPass(PGOCtxProfFlatteningPass(/*IsPreThinlink=*/false));
   }
 
   MPM.addPass(createModuleToFunctionPassAdaptor(
@@ -1265,8 +1259,10 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
     // FIXME(mtrofin): move AssignGUIDPass if there is agreement to use this
     // mechanism for GUIDs.
     MPM.addPass(AssignGUIDPass());
-    if (IsCtxProfUse)
+    if (IsCtxProfUse) {
+      MPM.addPass(PGOCtxProfFlatteningPass(/*IsPreThinlink=*/true));
       return MPM;
+    }
     // Block further inlining in the instrumented ctxprof case. This avoids
     // confusingly collecting profiles for the same GUID corresponding to
     // different variants of the function. We could do like PGO and identify
@@ -1307,6 +1303,9 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   // Remove any dead arguments exposed by cleanups, constant folding globals,
   // and argument promotion.
   MPM.addPass(DeadArgumentEliminationPass());
+
+  if (Phase == ThinOrFullLTOPhase::ThinLTOPostLink)
+    MPM.addPass(SimplifyTypeTestsPass());
 
   if (Phase != ThinOrFullLTOPhase::ThinLTOPreLink)
     MPM.addPass(CoroCleanupPass());
@@ -1568,6 +1567,10 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
     //        this may need to be revisited once we run GVN before loop deletion
     //        in the simplification pipeline.
     LPM.addPass(LoopDeletionPass());
+
+    if (PTO.LoopInterchange)
+      LPM.addPass(LoopInterchangePass());
+
     OptimizePM.addPass(
         createFunctionToLoopPassAdaptor(std::move(LPM), /*UseMemorySSA=*/false,
                                         /*UseBlockFrequencyInfo=*/false));
@@ -1602,7 +1605,8 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   OptimizePM.addPass(DivRemPairsPass());
 
   // Try to annotate calls that were created during optimization.
-  OptimizePM.addPass(TailCallElimPass());
+  OptimizePM.addPass(
+      TailCallElimPass(/*UpdateFunctionEntryCount=*/isInstrumentedPGOUse()));
 
   // LoopSink (and other loop passes since the last simplifyCFG) might have
   // resulted in single-entry-single-exit or empty blocks. Clean up the CFG.
@@ -2090,7 +2094,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   // LTO provides additional opportunities for tailcall elimination due to
   // link-time inlining, and visibility of nocapture attribute.
-  FPM.addPass(TailCallElimPass());
+  FPM.addPass(
+      TailCallElimPass(/*UpdateFunctionEntryCount=*/isInstrumentedPGOUse()));
 
   // Run a few AA driver optimizations here and now to cleanup the code.
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM),
@@ -2353,6 +2358,10 @@ AAManager PassBuilder::buildDefaultAAPipeline() {
   // The order in which these are registered determines their priority when
   // being queried.
 
+  // Add any target-specific alias analyses that should be run early.
+  if (TM)
+    TM->registerEarlyDefaultAliasAnalyses(AA);
+
   // First we register the basic alias analysis that provides the majority of
   // per-function local AA logic. This is a stateless, on-demand local set of
   // AA techniques.
@@ -2375,4 +2384,9 @@ AAManager PassBuilder::buildDefaultAAPipeline() {
     TM->registerDefaultAliasAnalyses(AA);
 
   return AA;
+}
+
+bool PassBuilder::isInstrumentedPGOUse() const {
+  return (PGOOpt && PGOOpt->Action == PGOOptions::IRUse) ||
+         !UseCtxProfile.empty();
 }

@@ -145,7 +145,7 @@ int main(int argc, char **argv) {
   // likewise not have features that limit the builtins to any particular
   // target.
   if (M->getTargetTriple().str().find("amdgcn") != std::string::npos ||
-      M->getTargetTriple().str() != "native_cpu") {
+      M->getTargetTriple().isNativeCPU()) {
     AttributeMask AM;
     AM.addAttribute("target-features");
     AM.addAttribute("target-cpu");

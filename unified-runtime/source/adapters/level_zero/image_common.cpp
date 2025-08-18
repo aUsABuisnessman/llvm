@@ -19,18 +19,9 @@
 #include "helpers/memory_helpers.hpp"
 #include "image_common.hpp"
 #include "logger/ur_logger.hpp"
+#include "platform.hpp"
 #include "sampler.hpp"
 #include "ur_interface_loader.hpp"
-
-typedef ze_result_t(ZE_APICALL *zeMemGetPitchFor2dImage_pfn)(
-    ze_context_handle_t hContext, ze_device_handle_t hDevice, size_t imageWidth,
-    size_t imageHeight, unsigned int elementSizeInBytes, size_t *rowPitch);
-
-typedef ze_result_t(ZE_APICALL *zeImageGetDeviceOffsetExp_pfn)(
-    ze_image_handle_t hImage, uint64_t *pDeviceOffset);
-
-zeMemGetPitchFor2dImage_pfn zeMemGetPitchFor2dImageFunctionPtr = nullptr;
-zeImageGetDeviceOffsetExp_pfn zeImageGetDeviceOffsetExpFunctionPtr = nullptr;
 
 namespace {
 
@@ -175,41 +166,21 @@ ur_result_t ze2urImageFormat(const ze_image_format_t &ZeImageFormat,
   ur_image_channel_type_t ChannelType;
   switch (ZeImageFormat.type) {
   case ZE_IMAGE_FORMAT_TYPE_UINT:
-    switch (ZeImageFormatTypeSize) {
-    case 8:
+    if (ZeImageFormatTypeSize == 8) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_UNSIGNED_INT8;
-      break;
-    case 16:
+    } else if (ZeImageFormatTypeSize == 16) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_UNSIGNED_INT16;
-      break;
-    case 32:
+    } else if (ZeImageFormatTypeSize == 32) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_UNSIGNED_INT32;
-      break;
-    default:
-      UR_LOG(ERR,
-             "ze2urImageFormat: unexpected image format type size: size "
-             "= {}",
-             ZeImageFormatTypeSize);
-      return UR_RESULT_ERROR_INVALID_VALUE;
     }
     break;
   case ZE_IMAGE_FORMAT_TYPE_SINT:
-    switch (ZeImageFormatTypeSize) {
-    case 8:
+    if (ZeImageFormatTypeSize == 8) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_SIGNED_INT8;
-      break;
-    case 16:
+    } else if (ZeImageFormatTypeSize == 16) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_SIGNED_INT16;
-      break;
-    case 32:
+    } else if (ZeImageFormatTypeSize == 32) {
       ChannelType = UR_IMAGE_CHANNEL_TYPE_SIGNED_INT32;
-      break;
-    default:
-      UR_LOG(ERR,
-             "ze2urImageFormat: unexpected image format type size: size "
-             "= {}",
-             ZeImageFormatTypeSize);
-      return UR_RESULT_ERROR_INVALID_VALUE;
     }
     break;
   case ZE_IMAGE_FORMAT_TYPE_UNORM:
@@ -302,7 +273,7 @@ ur_result_t bindlessImagesCreateImpl(ur_context_handle_t hContext,
                                      ur_exp_image_mem_native_handle_t hImageMem,
                                      const ur_image_format_t *pImageFormat,
                                      const ur_image_desc_t *pImageDesc,
-                                     ur_sampler_handle_t hSampler,
+                                     const ur_sampler_desc_t *pSamplerDesc,
                                      ur_exp_image_native_handle_t *phImage) {
   UR_ASSERT(hContext && hDevice && hImageMem,
             UR_RESULT_ERROR_INVALID_NULL_HANDLE);
@@ -317,8 +288,10 @@ ur_result_t bindlessImagesCreateImpl(ur_context_handle_t hContext,
   ZeImageDesc.pNext = &BindlessDesc;
 
   ZeStruct<ze_sampler_desc_t> ZeSamplerDesc;
-  if (hSampler) {
-    ZeSamplerDesc = hSampler->ZeSamplerDesc;
+  const bool Sampled = (pSamplerDesc != nullptr);
+  if (Sampled) {
+    ze_api_version_t ZeApiVersion = hContext->getPlatform()->ZeApiVersion;
+    UR_CALL(ur2zeSamplerDesc(ZeApiVersion, pSamplerDesc, ZeSamplerDesc));
     BindlessDesc.pNext = &ZeSamplerDesc;
     BindlessDesc.flags |= ZE_IMAGE_BINDLESS_EXP_FLAG_SAMPLED_IMAGE;
   }
@@ -353,7 +326,7 @@ ur_result_t bindlessImagesCreateImpl(ur_context_handle_t hContext,
              MemAllocProperties.type == ZE_MEMORY_TYPE_SHARED) {
     ZeStruct<ze_image_pitched_exp_desc_t> PitchedDesc;
     PitchedDesc.ptr = reinterpret_cast<void *>(hImageMem);
-    if (hSampler) {
+    if (Sampled) {
       ZeSamplerDesc.pNext = &PitchedDesc;
     } else {
       BindlessDesc.pNext = &PitchedDesc;
@@ -370,26 +343,16 @@ ur_result_t bindlessImagesCreateImpl(ur_context_handle_t hContext,
     return UR_RESULT_ERROR_INVALID_VALUE;
   }
 
-  static std::once_flag InitFlag;
-  std::call_once(InitFlag, [&]() {
-    ze_driver_handle_t DriverHandle = hContext->getPlatform()->ZeDriver;
-    auto Result = zeDriverGetExtensionFunctionAddress(
-        DriverHandle, "zeImageGetDeviceOffsetExp",
-        (void **)&zeImageGetDeviceOffsetExpFunctionPtr);
-    if (Result != ZE_RESULT_SUCCESS)
-      UR_LOG(ERR,
-             "zeDriverGetExtensionFunctionAddress "
-             "zeImageGetDeviceOffsetExpv failed, err = {}",
-             Result);
-  });
-  if (!zeImageGetDeviceOffsetExpFunctionPtr)
+  if (!hDevice->Platform->ZeImageGetDeviceOffsetExt.Supported)
     return UR_RESULT_ERROR_INVALID_OPERATION;
+
   uint64_t DeviceOffset{};
   ze_image_handle_t ZeImageTranslated;
   ZE2UR_CALL(zelLoaderTranslateHandle,
              (ZEL_HANDLE_IMAGE, ZeImage.get(), (void **)&ZeImageTranslated));
-  ZE2UR_CALL(zeImageGetDeviceOffsetExpFunctionPtr,
-             (ZeImageTranslated, &DeviceOffset));
+  ZE2UR_CALL(
+      hDevice->Platform->ZeImageGetDeviceOffsetExt.zeImageGetDeviceOffsetExp,
+      (ZeImageTranslated, &DeviceOffset));
   *phImage = DeviceOffset;
 
   std::shared_lock<ur_shared_mutex> Lock(hDevice->Mutex);
@@ -816,8 +779,7 @@ ur_result_t bindlessImagesHandleCopyFlags(
 
   switch (imageCopyFlags) {
   case UR_EXP_IMAGE_COPY_FLAG_HOST_TO_DEVICE: {
-    uint32_t SrcRowPitch =
-        pSrcImageDesc->width * getPixelSizeBytes(pSrcImageFormat);
+    uint32_t SrcRowPitch = pSrcImageDesc->rowPitch;
     uint32_t SrcSlicePitch = SrcRowPitch * pSrcImageDesc->height;
     if (pDstImageDesc->rowPitch == 0) {
       // Copy to Non-USM memory
@@ -861,8 +823,7 @@ ur_result_t bindlessImagesHandleCopyFlags(
     return UR_RESULT_SUCCESS;
   };
   case UR_EXP_IMAGE_COPY_FLAG_DEVICE_TO_HOST: {
-    uint32_t DstRowPitch =
-        pDstImageDesc->width * getPixelSizeBytes(pDstImageFormat);
+    uint32_t DstRowPitch = pDstImageDesc->rowPitch;
     uint32_t DstSlicePitch = DstRowPitch * pDstImageDesc->height;
     if (pSrcImageDesc->rowPitch == 0) {
       // Copy from Non-USM memory to host
@@ -1078,29 +1039,19 @@ ur_result_t urUSMPitchedAllocExp(ur_context_handle_t hContext,
   UR_ASSERT(widthInBytes != 0, UR_RESULT_ERROR_INVALID_USM_SIZE);
   UR_ASSERT(ppMem && pResultPitch, UR_RESULT_ERROR_INVALID_NULL_POINTER);
 
-  static std::once_flag InitFlag;
-  std::call_once(InitFlag, [&]() {
-    ze_driver_handle_t DriverHandle = hContext->getPlatform()->ZeDriver;
-    auto Result = zeDriverGetExtensionFunctionAddress(
-        DriverHandle, "zeMemGetPitchFor2dImage",
-        (void **)&zeMemGetPitchFor2dImageFunctionPtr);
-    if (Result != ZE_RESULT_SUCCESS)
-      UR_LOG(ERR,
-             "zeDriverGetExtensionFunctionAddress zeMemGetPitchFor2dImage "
-             "failed, err = {}",
-             Result);
-  });
-  if (!zeMemGetPitchFor2dImageFunctionPtr)
+  if (!hDevice->Platform->ZeMemGetPitchFor2dImageExt.Supported) {
     return UR_RESULT_ERROR_INVALID_OPERATION;
+  }
 
   size_t Width = widthInBytes / elementSizeBytes;
   size_t RowPitch;
   ze_device_handle_t ZeDeviceTranslated;
   ZE2UR_CALL(zelLoaderTranslateHandle, (ZEL_HANDLE_DEVICE, hDevice->ZeDevice,
                                         (void **)&ZeDeviceTranslated));
-  ZE2UR_CALL(zeMemGetPitchFor2dImageFunctionPtr,
-             (hContext->getZeHandle(), ZeDeviceTranslated, Width, height,
-              elementSizeBytes, &RowPitch));
+  ZE2UR_CALL(
+      hDevice->Platform->ZeMemGetPitchFor2dImageExt.zeMemGetPitchFor2dImage,
+      (hContext->getZeHandle(), ZeDeviceTranslated, Width, height,
+       elementSizeBytes, &RowPitch));
   *pResultPitch = RowPitch;
 
   size_t Size = height * RowPitch;
@@ -1132,6 +1083,16 @@ ur_result_t urBindlessImagesImageAllocateExp(
   return UR_RESULT_SUCCESS;
 }
 
+ur_result_t
+urBindlessImagesImageFreeExp([[maybe_unused]] ur_context_handle_t hContext,
+                             [[maybe_unused]] ur_device_handle_t hDevice,
+                             ur_exp_image_mem_native_handle_t hImageMem) {
+  ur_bindless_mem_handle_t *urImg =
+      reinterpret_cast<ur_bindless_mem_handle_t *>(hImageMem);
+  delete urImg;
+  return UR_RESULT_SUCCESS;
+}
+
 ur_result_t urBindlessImagesUnsampledImageCreateExp(
     ur_context_handle_t hContext, ur_device_handle_t hDevice,
     ur_exp_image_mem_native_handle_t hImageMem,
@@ -1146,9 +1107,10 @@ ur_result_t urBindlessImagesSampledImageCreateExp(
     ur_context_handle_t hContext, ur_device_handle_t hDevice,
     ur_exp_image_mem_native_handle_t hImageMem,
     const ur_image_format_t *pImageFormat, const ur_image_desc_t *pImageDesc,
-    ur_sampler_handle_t hSampler, ur_exp_image_native_handle_t *phImage) {
+    const ur_sampler_desc_t *pSamplerDesc,
+    ur_exp_image_native_handle_t *phImage) {
   UR_CALL(bindlessImagesCreateImpl(hContext, hDevice, hImageMem, pImageFormat,
-                                   pImageDesc, hSampler, phImage));
+                                   pImageDesc, pSamplerDesc, phImage));
   return UR_RESULT_SUCCESS;
 }
 
@@ -1177,7 +1139,8 @@ ur_result_t urBindlessImagesSampledImageHandleDestroyExp(
     ur_context_handle_t hContext, ur_device_handle_t hDevice,
     ur_exp_image_native_handle_t hImage) {
   // Sampled image is a combination of unsampled image and sampler.
-  // Sampler is released in urSamplerRelease.
+  // The sampler is tied to the image on creation, and is destroyed together
+  // with the image.
   return ur::level_zero::urBindlessImagesUnsampledImageHandleDestroyExp(
       hContext, hDevice, hImage);
 }
@@ -1274,6 +1237,18 @@ ur_result_t urBindlessImagesImportExternalMemoryExp(
       auto FileDescriptor =
           static_cast<const ur_exp_file_descriptor_t *>(pNext);
       importFd->fd = FileDescriptor->fd;
+      switch (memHandleType) {
+      case UR_EXP_EXTERNAL_MEM_TYPE_OPAQUE_FD:
+        importFd->flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
+        break;
+      case UR_EXP_EXTERNAL_MEM_TYPE_DMA_BUF:
+        importFd->flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF;
+        break;
+      default:
+        delete importFd;
+        delete externalMemoryData;
+        return UR_RESULT_ERROR_INVALID_VALUE;
+      }
       importFd->flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
       externalMemoryData->importExtensionDesc = importFd;
       externalMemoryData->type = UR_ZE_EXTERNAL_OPAQUE_FD;
@@ -1291,7 +1266,9 @@ ur_result_t urBindlessImagesImportExternalMemoryExp(
       case UR_EXP_EXTERNAL_MEM_TYPE_WIN32_NT_DX12_RESOURCE:
         importWin32->flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_D3D12_RESOURCE;
         break;
-      case UR_EXP_EXTERNAL_MEM_TYPE_OPAQUE_FD:
+      case UR_EXP_EXTERNAL_MEM_TYPE_WIN32_NT_DX11_RESOURCE:
+        importWin32->flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_D3D11_TEXTURE;
+        break;
       default:
         delete importWin32;
         delete externalMemoryData;
@@ -1336,8 +1313,6 @@ ur_result_t urBindlessImagesMapExternalArrayExp(
   UR_CALL(createUrImgFromZeImage(hContext->getZeHandle(), hDevice->ZeDevice,
                                  ZeImageDesc, phImageMem));
 
-  externalMemoryData->urMemoryHandle =
-      reinterpret_cast<ur_mem_handle_t>(*phImageMem);
   return UR_RESULT_SUCCESS;
 }
 
@@ -1350,8 +1325,6 @@ ur_result_t urBindlessImagesReleaseExternalMemoryExp(
 
   struct ur_ze_external_memory_data *externalMemoryData =
       reinterpret_cast<ur_ze_external_memory_data *>(hExternalMem);
-
-  UR_CALL(ur::level_zero::urMemRelease(externalMemoryData->urMemoryHandle));
 
   switch (externalMemoryData->type) {
   case UR_ZE_EXTERNAL_OPAQUE_FD:
@@ -1533,7 +1506,7 @@ ur_result_t urBindlessImagesMapExternalLinearMemoryExp(
     uint64_t size, ur_exp_external_mem_handle_t hExternalMem, void **phRetMem) {
   UR_ASSERT(hContext && hDevice && hExternalMem,
             UR_RESULT_ERROR_INVALID_NULL_HANDLE);
-  UR_ASSERT(offset && size, UR_RESULT_ERROR_INVALID_BUFFER_SIZE);
+  UR_ASSERT(size, UR_RESULT_ERROR_INVALID_BUFFER_SIZE);
 
   struct ur_ze_external_memory_data *externalMemoryData =
       reinterpret_cast<ur_ze_external_memory_data *>(hExternalMem);
@@ -1546,9 +1519,9 @@ ur_result_t urBindlessImagesMapExternalLinearMemoryExp(
   allocDesc.pNext = externalMemoryData->importExtensionDesc;
   void *mappedMemory;
 
-  ze_result_t zeResult =
-      zeMemAllocDevice(hContext->getZeHandle(), &allocDesc, size, 1,
-                       hDevice->ZeDevice, &mappedMemory);
+  ze_result_t zeResult = ZE_CALL_NOCHECK(
+      zeMemAllocDevice, (hContext->getZeHandle(), &allocDesc, size, 0,
+                         hDevice->ZeDevice, &mappedMemory));
   if (zeResult != ZE_RESULT_SUCCESS) {
     return UR_RESULT_ERROR_OUT_OF_RESOURCES;
   }
@@ -1556,15 +1529,23 @@ ur_result_t urBindlessImagesMapExternalLinearMemoryExp(
   zeResult = zeContextMakeMemoryResident(hContext->getZeHandle(),
                                          hDevice->ZeDevice, mappedMemory, size);
   if (zeResult != ZE_RESULT_SUCCESS) {
-    zeMemFree(hContext->getZeHandle(), mappedMemory);
+    ZE_CALL_NOCHECK(zeMemFree, (hContext->getZeHandle(), mappedMemory));
     return UR_RESULT_ERROR_UNKNOWN;
   }
+
   *phRetMem = reinterpret_cast<void *>(
       reinterpret_cast<uintptr_t>(mappedMemory) + offset);
 
-  externalMemoryData->urMemoryHandle =
-      reinterpret_cast<ur_mem_handle_t>(*phRetMem);
+  return UR_RESULT_SUCCESS;
+}
 
+ur_result_t urBindlessImagesFreeMappedLinearMemoryExp(
+    ur_context_handle_t hContext, [[maybe_unused]] ur_device_handle_t hDevice,
+    void *pMem) {
+  UR_ASSERT(hContext, UR_RESULT_ERROR_INVALID_NULL_HANDLE);
+  UR_ASSERT(pMem, UR_RESULT_ERROR_INVALID_NULL_POINTER);
+
+  ZE2UR_CALL(zeMemFree, (hContext->getZeHandle(), pMem));
   return UR_RESULT_SUCCESS;
 }
 
@@ -1629,6 +1610,20 @@ ur_result_t urBindlessImagesGetImageSampledHandleSupportExp(
   *pSupportedRet = verifyCommonImagePropertiesSupport(
       hDevice, pImageDesc, pImageFormat, imageMemHandleType);
 
+  return UR_RESULT_SUCCESS;
+}
+
+ur_result_t urBindlessImagesSupportsImportingHandleTypeExp(
+    [[maybe_unused]] ur_device_handle_t hDevice,
+    ur_exp_external_mem_type_t memHandleType, ur_bool_t *pSupportedRet) {
+#if defined(_WIN32)
+  *pSupportedRet =
+      (memHandleType == UR_EXP_EXTERNAL_MEM_TYPE_WIN32_NT) ||
+      (memHandleType == UR_EXP_EXTERNAL_MEM_TYPE_WIN32_NT_DX12_RESOURCE);
+#else
+  *pSupportedRet = (memHandleType == UR_EXP_EXTERNAL_MEM_TYPE_OPAQUE_FD) ||
+                   (memHandleType == UR_EXP_EXTERNAL_MEM_TYPE_DMA_BUF);
+#endif
   return UR_RESULT_SUCCESS;
 }
 

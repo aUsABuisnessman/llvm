@@ -12,6 +12,7 @@
 #include <ur_api.h>
 #include <ur_print.hpp>
 
+#include "common/ur_ref_count.hpp"
 #include "context.hpp"
 #include "logger/ur_logger.hpp"
 #include <cuda.h>
@@ -100,7 +101,7 @@ struct fill_command_data {
 // Command handle that can be returned from command append entry-points.
 // The type of the command is specified by a CommandType field, with
 // additional command-type-specific data stored in the CommandData enum.
-struct ur_exp_command_buffer_command_handle_t_ {
+struct ur_exp_command_buffer_command_handle_t_ : ur::cuda::handle_base {
   using command_data_type_t =
       std::variant<null_command_data, kernel_command_data, fill_command_data>;
 
@@ -109,8 +110,9 @@ struct ur_exp_command_buffer_command_handle_t_ {
       CUgraphNode Node, CUgraphNode SignalNode,
       const std::vector<CUgraphNode> &WaitNodes,
       command_data_type_t Data = null_command_data{})
-      : CommandBuffer(CommandBuffer), Node(Node), SignalNode(SignalNode),
-        WaitNodes(WaitNodes), Type(Type), CommandData(Data) {}
+      : handle_base(), CommandBuffer(CommandBuffer), Node(Node),
+        SignalNode(SignalNode), WaitNodes(WaitNodes), Type(Type),
+        CommandData(Data) {}
 
   // Parent UR command-buffer.
   ur_exp_command_buffer_handle_t CommandBuffer;
@@ -127,10 +129,11 @@ struct ur_exp_command_buffer_command_handle_t_ {
   command_data_type_t CommandData;
 };
 
-struct ur_exp_command_buffer_handle_t_ {
+struct ur_exp_command_buffer_handle_t_ : ur::cuda::handle_base {
 
   ur_exp_command_buffer_handle_t_(ur_context_handle_t Context,
-                                  ur_device_handle_t Device, bool IsUpdatable);
+                                  ur_device_handle_t Device, bool IsUpdatable,
+                                  bool IsInOrder);
 
   ~ur_exp_command_buffer_handle_t_();
 
@@ -171,27 +174,25 @@ struct ur_exp_command_buffer_handle_t_ {
     return SyncPoint;
   }
 
-  uint32_t incrementReferenceCount() noexcept { return ++RefCount; }
-  uint32_t decrementReferenceCount() noexcept { return --RefCount; }
-  uint32_t getReferenceCount() const noexcept { return RefCount; }
-
   // UR context associated with this command-buffer
   ur_context_handle_t Context;
   // Device associated with this command-buffer
   ur_device_handle_t Device;
   // Whether commands in the command-buffer can be updated
   bool IsUpdatable;
+  // Whether commands in the command-buffer are in-order.
+  bool IsInOrder;
   // Cuda Graph handle
   CUgraph CudaGraph;
   // Cuda Graph Exec handle
   CUgraphExec CudaGraphExec = nullptr;
   // Atomic variable counting the number of reference to this command_buffer
   // using std::atomic prevents data race when incrementing/decrementing.
-  std::atomic_uint32_t RefCount;
+  ur::RefCount RefCount;
 
-  // Map of sync_points to ur_events
-  std::unordered_map<ur_exp_command_buffer_sync_point_t, CUgraphNode>
-      SyncPoints;
+  // Ordered map of sync_points to ur_events, so that we can find the last
+  // node added to an in-order command-buffer.
+  std::map<ur_exp_command_buffer_sync_point_t, CUgraphNode> SyncPoints;
   // Next sync_point value (may need to consider ways to reuse values if 32-bits
   // is not enough)
   ur_exp_command_buffer_sync_point_t NextSyncPoint;

@@ -5,7 +5,8 @@
 
 add_ur_lit_testsuite(conformance DEPENDS urinfo)
 
-set(UR_CONFORMANCE_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "Internal cache variable for conformance test root")
+set(UR_CONFORMANCE_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL
+    "Internal cache variable for conformance test root")
 
 set(UR_CONFORMANCE_DEVICE_BINARIES_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/device_binaries" CACHE INTERNAL
@@ -41,11 +42,13 @@ foreach(adapter ${UR_ADAPTERS_LIST})
     if(NOT "${adapter}" STREQUAL "mock")
         if(UR_STANDALONE_BUILD)
             add_custom_target(check-unified-runtime-conformance-${adapter}
-                COMMAND "${URLIT_LIT_BINARY}" "${CMAKE_CURRENT_BINARY_DIR}" -v -Dselector=${adapter}:*
+                COMMAND "${URLIT_LIT_BINARY}" "${CMAKE_CURRENT_BINARY_DIR}"
+                    -v -Dselector=${adapter}:*
                 DEPENDS deps_check-unified-runtime-conformance
             )
         else()
-            add_lit_testsuite(check-unified-runtime-conformance-${adapter} "Running Unified Runtime ${adapter} conformance tests"
+            add_lit_testsuite(check-unified-runtime-conformance-${adapter}
+                "Running Unified Runtime ${adapter} conformance tests"
                 ${CMAKE_CURRENT_BINARY_DIR}
                 DEPENDS FileCheck deps_check-unified-runtime-conformance
                 PARAMS selector=${adapter}:*
@@ -66,6 +69,7 @@ add_subdirectory(event)
 add_subdirectory(queue)
 add_subdirectory(sampler)
 add_subdirectory(virtual_memory)
+add_subdirectory(exp_usm_context_memcpy)
 
 set(TEST_SUBDIRECTORIES_DPCXX
     "device_code"
@@ -76,7 +80,6 @@ set(TEST_SUBDIRECTORIES_DPCXX
     "exp_command_buffer"
     "exp_enqueue_native"
     "exp_usm_p2p"
-    "exp_launch_properties"
     "memory-migrate"
     "usm"
 )
@@ -89,13 +92,13 @@ if(UR_FOUND_DPCXX)
     file(MAKE_DIRECTORY ${UR_CONFORMANCE_DEVICE_BINARIES_DIR})
 
     if("${UR_CONFORMANCE_TARGET_TRIPLES}" STREQUAL "")
-        if(UR_BUILD_ADAPTER_L0 OR UR_BUILD_ADAPTER_L0_V2 OR UR_BUILD_ADAPTER_OPENCL OR UR_BUILD_ADAPTER_ALL)
+        if(UR_BUILD_ADAPTER_L0 OR UR_BUILD_ADAPTER_OFFLOAD OR UR_BUILD_ADAPTER_L0_V2 OR UR_BUILD_ADAPTER_OPENCL OR UR_BUILD_ADAPTER_ALL)
             list(APPEND TARGET_TRIPLES "spir64")
         endif()
-        if(UR_BUILD_ADAPTER_CUDA OR UR_BUILD_ADAPTER_ALL)
+        if(UR_BUILD_ADAPTER_CUDA OR UR_BUILD_ADAPTER_OFFLOAD OR UR_BUILD_ADAPTER_ALL)
             list(APPEND TARGET_TRIPLES "nvptx64-nvidia-cuda")
         endif()
-        if(UR_BUILD_ADAPTER_HIP OR UR_BUILD_ADAPTER_ALL)
+        if(UR_BUILD_ADAPTER_HIP OR UR_BUILD_ADAPTER_OFFLOAD OR UR_BUILD_ADAPTER_ALL)
             list(APPEND TARGET_TRIPLES "amdgcn-amd-amdhsa")
         endif()
     else()

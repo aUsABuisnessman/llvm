@@ -37,12 +37,19 @@ extern thread_local char ErrorMessage[MaxMessageSize];
            __FUNCTION__)                                                       \
     return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
 
+namespace ur::native_cpu {
+struct ddi_getter {
+  static const ur_dditable_t *value();
+};
+using handle_base = ur::handle_base<ddi_getter>;
+} // namespace ur::native_cpu
+
 // Todo: replace this with a common helper once it is available
-struct RefCounted {
+struct RefCounted : ur::native_cpu::handle_base {
   std::atomic_uint32_t _refCount;
   uint32_t incrementReferenceCount() { return ++_refCount; }
   uint32_t decrementReferenceCount() { return --_refCount; }
-  RefCounted() : _refCount{1} {}
+  RefCounted() : handle_base(), _refCount{1} {}
   uint32_t getReferenceCount() const { return _refCount; }
 };
 
@@ -72,6 +79,20 @@ inline void *aligned_malloc(size_t alignment, size_t size) {
   ptr = std::aligned_alloc(alignment, size);
 #endif
   return ptr;
+}
+
+// In many cases we require aligned memory without being told what the alignment
+// requirement is. This helper function returns maximally aligned memory based
+// on the size.
+inline void *aligned_malloc(size_t size) {
+  constexpr size_t max_alignment = 16 * sizeof(double);
+  size_t alignment = max_alignment;
+  while (alignment > size) {
+    alignment >>= 1;
+  }
+  // aligned_malloc requires size to be a multiple of alignment; round up.
+  size = (size + alignment - 1) & ~(alignment - 1);
+  return aligned_malloc(alignment, size);
 }
 
 inline void aligned_free(void *ptr) {

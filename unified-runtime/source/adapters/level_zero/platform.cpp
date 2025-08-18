@@ -28,19 +28,14 @@ ur_result_t urPlatformGet(
     uint32_t *NumPlatforms) {
   // Platform handles are cached for reuse. This is to ensure consistent
   // handle pointers across invocations and to improve retrieval performance.
-  if (const auto *cached_platforms = GlobalAdapter->PlatformCache->get_value();
-      cached_platforms) {
-    uint32_t nplatforms = (uint32_t)cached_platforms->size();
-    if (NumPlatforms) {
-      *NumPlatforms = nplatforms;
+  uint32_t nplatforms = (uint32_t)GlobalAdapter->Platforms.size();
+  if (NumPlatforms) {
+    *NumPlatforms = nplatforms;
+  }
+  if (Platforms) {
+    for (uint32_t i = 0; i < std::min(nplatforms, NumEntries); ++i) {
+      Platforms[i] = GlobalAdapter->Platforms.at(i).get();
     }
-    if (Platforms) {
-      for (uint32_t i = 0; i < std::min(nplatforms, NumEntries); ++i) {
-        Platforms[i] = cached_platforms->at(i).get();
-      }
-    }
-  } else {
-    return GlobalAdapter->PlatformCache->get_error();
   }
 
   return UR_RESULT_SUCCESS;
@@ -98,7 +93,7 @@ ur_result_t urPlatformGetInfo(
     //
     return ReturnValue(Platform->ZeDriverApiVersion.c_str());
   case UR_PLATFORM_INFO_BACKEND:
-    return ReturnValue(UR_PLATFORM_BACKEND_LEVEL_ZERO);
+    return ReturnValue(UR_BACKEND_LEVEL_ZERO);
   case UR_PLATFORM_INFO_ADAPTER:
     return ReturnValue(GlobalAdapter);
   default:
@@ -292,6 +287,18 @@ ur_result_t ur_platform_handle_t_::initialize() {
       if (extension.version ==
           ZEX_INTEL_QUEUE_COPY_OPERATIONS_OFFLOAD_HINT_EXP_VERSION_1_0) {
         ZeCopyOffloadExtensionSupported = true;
+      }
+    }
+    if (strncmp(extension.name, ZE_BINDLESS_IMAGE_EXP_NAME,
+                strlen(ZE_BINDLESS_IMAGE_EXP_NAME) + 1) == 0) {
+      if (extension.version == ZE_BINDLESS_IMAGE_EXP_VERSION_1_0) {
+        ZeBindlessImagesExtensionSupported = true;
+      }
+    }
+    if (strncmp(extension.name, ZE_DEVICE_LUID_EXT_NAME,
+                strlen(ZE_DEVICE_LUID_EXT_NAME) + 1) == 0) {
+      if (extension.version == ZE_DEVICE_LUID_EXT_VERSION_1_0) {
+        ZeLUIDSupported = true;
       }
     }
     zeDriverExtensionMap[extension.name] = extension.version;
@@ -542,6 +549,22 @@ ur_result_t ur_platform_handle_t_::initialize() {
         ZeCommandListImmediateAppendExt
             .zeCommandListImmediateAppendCommandListsExp != nullptr;
   }
+
+  ZE_CALL_NOCHECK(zeDriverGetExtensionFunctionAddress,
+                  (ZeDriver, "zeImageGetDeviceOffsetExp",
+                   reinterpret_cast<void **>(
+                       &ZeImageGetDeviceOffsetExt.zeImageGetDeviceOffsetExp)));
+
+  ZeImageGetDeviceOffsetExt.Supported =
+      ZeImageGetDeviceOffsetExt.zeImageGetDeviceOffsetExp != nullptr;
+
+  ZE_CALL_NOCHECK(zeDriverGetExtensionFunctionAddress,
+                  (ZeDriver, "zeMemGetPitchFor2dImage",
+                   reinterpret_cast<void **>(
+                       &ZeMemGetPitchFor2dImageExt.zeMemGetPitchFor2dImage)));
+
+  ZeMemGetPitchFor2dImageExt.Supported =
+      ZeMemGetPitchFor2dImageExt.zeMemGetPitchFor2dImage != nullptr;
 
   return UR_RESULT_SUCCESS;
 }

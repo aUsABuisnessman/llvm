@@ -15,19 +15,6 @@
 #include "../helpers/memory_helpers.hpp"
 #include "../image_common.hpp"
 
-static ur_mem_buffer_t::device_access_mode_t
-getDeviceAccessMode(ur_mem_flags_t memFlag) {
-  if (memFlag & UR_MEM_FLAG_READ_WRITE) {
-    return ur_mem_buffer_t::device_access_mode_t::read_write;
-  } else if (memFlag & UR_MEM_FLAG_READ_ONLY) {
-    return ur_mem_buffer_t::device_access_mode_t::read_only;
-  } else if (memFlag & UR_MEM_FLAG_WRITE_ONLY) {
-    return ur_mem_buffer_t::device_access_mode_t::write_only;
-  } else {
-    return ur_mem_buffer_t::device_access_mode_t::read_write;
-  }
-}
-
 static bool isAccessCompatible(ur_mem_buffer_t::device_access_mode_t requested,
                                ur_mem_buffer_t::device_access_mode_t actual) {
   return requested == actual ||
@@ -45,35 +32,34 @@ ur_usm_handle_t::ur_usm_handle_t(ur_context_handle_t hContext, size_t size,
     : ur_mem_buffer_t(hContext, size, device_access_mode_t::read_write),
       ptr(const_cast<void *>(ptr)) {}
 
-void *ur_usm_handle_t::getDevicePtr(
-    ur_device_handle_t /*hDevice*/, device_access_mode_t /*access*/,
-    size_t /*offset*/, size_t /*size*/,
-    std::function<void(void *src, void *dst, size_t)> /*migrate*/) {
-  return ptr;
+void *ur_usm_handle_t::getDevicePtr(ur_device_handle_t /*hDevice*/,
+                                    device_access_mode_t /*access*/,
+                                    size_t offset, size_t /*size*/,
+                                    ze_command_list_handle_t /*cmdList*/,
+                                    wait_list_view & /*waitListView*/) {
+  return ur_cast<char *>(ptr) + offset;
 }
 
-void *
-ur_usm_handle_t::mapHostPtr(ur_map_flags_t /*flags*/, size_t /*offset*/,
-                            size_t /*size*/,
-                            std::function<void(void *src, void *dst, size_t)>) {
-  return ptr;
+void *ur_usm_handle_t::mapHostPtr(ur_map_flags_t /*flags*/, size_t offset,
+                                  size_t /*size*/,
+                                  ze_command_list_handle_t /*cmdList*/,
+                                  wait_list_view & /*waitListView*/) {
+  return ur_cast<char *>(ptr) + offset;
 }
 
-void ur_usm_handle_t::unmapHostPtr(
-    void * /*pMappedPtr*/, std::function<void(void *src, void *dst, size_t)>) {
+void ur_usm_handle_t::unmapHostPtr(void * /*pMappedPtr*/,
+                                   ze_command_list_handle_t /*cmdList*/,
+                                   wait_list_view & /*waitListView*/) {
   /* nop */
 }
 
 ur_integrated_buffer_handle_t::ur_integrated_buffer_handle_t(
     ur_context_handle_t hContext, void *hostPtr, size_t size,
-    host_ptr_action_t hostPtrAction, device_access_mode_t accessMode)
+    device_access_mode_t accessMode)
     : ur_mem_buffer_t(hContext, size, accessMode) {
-  bool hostPtrImported = false;
-  if (hostPtrAction == host_ptr_action_t::import) {
-    hostPtrImported =
-        maybeImportUSM(hContext->getPlatform()->ZeDriverHandleExpTranslated,
-                       hContext->getZeHandle(), hostPtr, size);
-  }
+  bool hostPtrImported =
+      maybeImportUSM(hContext->getPlatform()->ZeDriverHandleExpTranslated,
+                     hContext->getZeHandle(), hostPtr, size);
 
   if (hostPtrImported) {
     this->ptr = usm_unique_ptr_t(hostPtr, [hContext](void *ptr) {
@@ -119,32 +105,41 @@ ur_integrated_buffer_handle_t::~ur_integrated_buffer_handle_t() {
 
 void *ur_integrated_buffer_handle_t::getDevicePtr(
     ur_device_handle_t /*hDevice*/, device_access_mode_t /*access*/,
-    size_t offset, size_t /*size*/,
-    std::function<void(void *src, void *dst, size_t)> /*migrate*/) {
+    size_t offset, size_t /*size*/, ze_command_list_handle_t /*cmdList*/,
+    wait_list_view & /*waitListView*/) {
   return ur_cast<char *>(ptr.get()) + offset;
 }
 
 void *ur_integrated_buffer_handle_t::mapHostPtr(
     ur_map_flags_t /*flags*/, size_t offset, size_t /*size*/,
-    std::function<void(void *src, void *dst, size_t)> /*migrate*/) {
+    ze_command_list_handle_t /*cmdList*/, wait_list_view & /*waitListView*/) {
+  // TODO: if writeBackPtr is set, we should map to that pointer
+  // because that's what SYCL expects, SYCL will attempt to call free
+  // on the resulting pointer leading to double free with the current
+  // implementation. Investigate the SYCL implementation.
   return ur_cast<char *>(ptr.get()) + offset;
 }
 
 void ur_integrated_buffer_handle_t::unmapHostPtr(
-    void * /*pMappedPtr*/, std::function<void(void *src, void *dst, size_t)>) {
+    void * /*pMappedPtr*/, ze_command_list_handle_t /*cmdList*/,
+    wait_list_view & /*waitListView*/) {
+  // TODO: if writeBackPtr is set, we should copy the data back
   /* nop */
 }
 
 static v2::raii::command_list_unique_handle
 getSyncCommandListForCopy(ur_context_handle_t hContext,
                           ur_device_handle_t hDevice) {
-  return hContext->getCommandListCache().getImmediateCommandList(
-      hDevice->ZeDevice, true,
+  v2::command_list_desc_t listDesc;
+  listDesc.IsInOrder = true;
+  listDesc.Ordinal =
       hDevice
           ->QueueGroup[ur_device_handle_t_::queue_group_info_t::type::Compute]
-          .ZeOrdinal,
-      true, ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS, ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
-      std::nullopt);
+          .ZeOrdinal;
+  listDesc.CopyOffloadEnable = true;
+  return hContext->getCommandListCache().getImmediateCommandList(
+      hDevice->ZeDevice, listDesc, ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS,
+      ZE_COMMAND_QUEUE_PRIORITY_NORMAL, std::nullopt);
 }
 
 static ur_result_t synchronousZeCopy(ur_context_handle_t hContext,
@@ -203,8 +198,23 @@ ur_discrete_buffer_handle_t::ur_discrete_buffer_handle_t(
     device_access_mode_t accessMode)
     : ur_mem_buffer_t(hContext, size, accessMode),
       deviceAllocations(hContext->getPlatform()->getNumDevices()),
-      activeAllocationDevice(nullptr), mapToPtr(hostPtr), hostAllocations() {
+      activeAllocationDevice(nullptr), mapToPtr(nullptr, nullptr),
+      hostAllocations() {
   if (hostPtr) {
+    // Try importing the pointer to speed up memory copies for map/unmap
+    bool hostPtrImported =
+        maybeImportUSM(hContext->getPlatform()->ZeDriverHandleExpTranslated,
+                       hContext->getZeHandle(), hostPtr, size);
+
+    if (hostPtrImported) {
+      mapToPtr = usm_unique_ptr_t(hostPtr, [hContext](void *ptr) {
+        ZeUSMImport.doZeUSMRelease(
+            hContext->getPlatform()->ZeDriverHandleExpTranslated, ptr);
+      });
+    } else {
+      mapToPtr = usm_unique_ptr_t(hostPtr, [](void *) {});
+    }
+
     auto initialDevice = hContext->getDevices()[0];
     UR_CALL_THROWS(migrateBufferTo(initialDevice, hostPtr, size));
   }
@@ -255,8 +265,8 @@ void *ur_discrete_buffer_handle_t::getActiveDeviceAlloc(size_t offset) {
 
 void *ur_discrete_buffer_handle_t::getDevicePtr(
     ur_device_handle_t hDevice, device_access_mode_t /*access*/, size_t offset,
-    size_t /*size*/,
-    std::function<void(void *src, void *dst, size_t)> /*migrate*/) {
+    size_t /*size*/, ze_command_list_handle_t /*cmdList*/,
+    wait_list_view & /*waitListView*/) {
   TRACK_SCOPE_LATENCY("ur_discrete_buffer_handle_t::getDevicePtr");
 
   if (!activeAllocationDevice) {
@@ -288,24 +298,37 @@ void *ur_discrete_buffer_handle_t::getDevicePtr(
   return getActiveDeviceAlloc(offset);
 }
 
-void *ur_discrete_buffer_handle_t::mapHostPtr(
-    ur_map_flags_t flags, size_t offset, size_t size,
-    std::function<void(void *src, void *dst, size_t)> migrate) {
+static void migrateMemory(ze_command_list_handle_t cmdList, void *src,
+                          void *dst, size_t size,
+                          wait_list_view &waitListView) {
+  if (!cmdList) {
+    throw UR_RESULT_ERROR_INVALID_NULL_HANDLE;
+  }
+  ZE2UR_CALL_THROWS(zeCommandListAppendMemoryCopy,
+                    (cmdList, dst, src, size, nullptr, waitListView.num,
+                     waitListView.handles));
+  waitListView.clear();
+}
+
+void *ur_discrete_buffer_handle_t::mapHostPtr(ur_map_flags_t flags,
+                                              size_t offset, size_t size,
+                                              ze_command_list_handle_t cmdList,
+                                              wait_list_view &waitListView) {
   TRACK_SCOPE_LATENCY("ur_discrete_buffer_handle_t::mapHostPtr");
   // TODO: use async alloc?
 
-  void *ptr = mapToPtr;
+  void *ptr = mapToPtr.get();
   if (!ptr) {
     UR_CALL_THROWS(hContext->getDefaultUSMPool()->allocate(
         hContext, nullptr, nullptr, UR_USM_TYPE_HOST, size, &ptr));
   }
 
   usm_unique_ptr_t mappedPtr =
-      usm_unique_ptr_t(ptr, [ownsAlloc = bool(mapToPtr), this](void *p) {
+      usm_unique_ptr_t(ptr, [ownsAlloc = !bool(mapToPtr), this](void *p) {
         if (ownsAlloc) {
           auto ret = hContext->getDefaultUSMPool()->free(p);
           if (ret != UR_RESULT_SUCCESS) {
-            UR_LOG(ERR, "Failed to mapped memory: {}", ret);
+            UR_LOG(ERR, "Failed to free mapped memory: {}", ret);
           }
         }
       });
@@ -314,15 +337,16 @@ void *ur_discrete_buffer_handle_t::mapHostPtr(
 
   if (activeAllocationDevice && (flags & UR_MAP_FLAG_READ)) {
     auto srcPtr = getActiveDeviceAlloc(offset);
-    migrate(srcPtr, hostAllocations.back().ptr.get(), size);
+    migrateMemory(cmdList, srcPtr, hostAllocations.back().ptr.get(), size,
+                  waitListView);
   }
 
   return hostAllocations.back().ptr.get();
 }
 
-void ur_discrete_buffer_handle_t::unmapHostPtr(
-    void *pMappedPtr,
-    std::function<void(void *src, void *dst, size_t)> migrate) {
+void ur_discrete_buffer_handle_t::unmapHostPtr(void *pMappedPtr,
+                                               ze_command_list_handle_t cmdList,
+                                               wait_list_view &waitListView) {
   TRACK_SCOPE_LATENCY("ur_discrete_buffer_handle_t::unmapHostPtr");
 
   auto hostAlloc =
@@ -346,8 +370,9 @@ void ur_discrete_buffer_handle_t::unmapHostPtr(
   // UR_MAP_FLAG_WRITE_INVALIDATE_REGION when there is an active device
   // allocation. is this correct?
   if (activeAllocationDevice) {
-    migrate(hostAlloc->ptr.get(), getActiveDeviceAlloc(hostAlloc->offset),
-            hostAlloc->size);
+    migrateMemory(cmdList, hostAlloc->ptr.get(),
+                  getActiveDeviceAlloc(hostAlloc->offset), hostAlloc->size,
+                  waitListView);
   }
 
   hostAllocations.erase(hostAlloc);
@@ -366,30 +391,36 @@ ur_shared_buffer_handle_t::ur_shared_buffer_handle_t(
 
 void *ur_shared_buffer_handle_t::getDevicePtr(
     ur_device_handle_t, device_access_mode_t, size_t offset, size_t,
-    std::function<void(void *src, void *dst, size_t)>) {
+    ze_command_list_handle_t /*cmdList*/, wait_list_view & /*waitListView*/) {
   return reinterpret_cast<char *>(ptr.get()) + offset;
 }
 
-void *ur_shared_buffer_handle_t::mapHostPtr(
-    ur_map_flags_t, size_t offset, size_t,
-    std::function<void(void *src, void *dst, size_t)>) {
+void *
+ur_shared_buffer_handle_t::mapHostPtr(ur_map_flags_t, size_t offset, size_t,
+                                      ze_command_list_handle_t /*cmdList*/,
+                                      wait_list_view & /*waitListView*/) {
   return reinterpret_cast<char *>(ptr.get()) + offset;
 }
 
 void ur_shared_buffer_handle_t::unmapHostPtr(
-    void *, std::function<void(void *src, void *dst, size_t)>) {
+    void *, ze_command_list_handle_t /*cmdList*/,
+    wait_list_view & /*waitListView*/) {
   // nop
 }
 
-static bool useHostBuffer(ur_context_handle_t hContext) {
+static bool useHostBuffer(ur_context_handle_t /* hContext */) {
   // We treat integrated devices (physical memory shared with the CPU)
   // differently from discrete devices (those with distinct memories).
   // For integrated devices, allocating the buffer in the host memory
   // enables automatic access from the device, and makes copying
   // unnecessary in the map/unmap operations. This improves performance.
-  return hContext->getDevices().size() == 1 &&
-         hContext->getDevices()[0]->ZeDeviceProperties->flags &
-             ZE_DEVICE_PROPERTY_FLAG_INTEGRATED;
+
+  // TODO: fix integrated buffer implementation
+  return false;
+
+  // return hContext->getDevices().size() == 1 &&
+  //        hContext->getDevices()[0]->ZeDeviceProperties->flags &
+  //            ZE_DEVICE_PROPERTY_FLAG_INTEGRATED;
 }
 
 ur_mem_sub_buffer_t::ur_mem_sub_buffer_t(ur_mem_handle_t hParent, size_t offset,
@@ -404,24 +435,27 @@ ur_mem_sub_buffer_t::~ur_mem_sub_buffer_t() {
   ur::level_zero::urMemRelease(hParent);
 }
 
-void *ur_mem_sub_buffer_t::getDevicePtr(
-    ur_device_handle_t hDevice, device_access_mode_t access, size_t offset,
-    size_t size, std::function<void(void *src, void *dst, size_t)> migrate) {
+void *ur_mem_sub_buffer_t::getDevicePtr(ur_device_handle_t hDevice,
+                                        device_access_mode_t access,
+                                        size_t offset, size_t size,
+                                        ze_command_list_handle_t cmdList,
+                                        wait_list_view &waitListView) {
   return hParent->getBuffer()->getDevicePtr(
-      hDevice, access, offset + this->offset, size, std::move(migrate));
+      hDevice, access, offset + this->offset, size, cmdList, waitListView);
 }
 
-void *ur_mem_sub_buffer_t::mapHostPtr(
-    ur_map_flags_t flags, size_t offset, size_t size,
-    std::function<void(void *src, void *dst, size_t)> migrate) {
+void *ur_mem_sub_buffer_t::mapHostPtr(ur_map_flags_t flags, size_t offset,
+                                      size_t size,
+                                      ze_command_list_handle_t cmdList,
+                                      wait_list_view &waitListView) {
   return hParent->getBuffer()->mapHostPtr(flags, offset + this->offset, size,
-                                          std::move(migrate));
+                                          cmdList, waitListView);
 }
 
-void ur_mem_sub_buffer_t::unmapHostPtr(
-    void *pMappedPtr,
-    std::function<void(void *src, void *dst, size_t)> migrate) {
-  return hParent->getBuffer()->unmapHostPtr(pMappedPtr, std::move(migrate));
+void ur_mem_sub_buffer_t::unmapHostPtr(void *pMappedPtr,
+                                       ze_command_list_handle_t cmdList,
+                                       wait_list_view &waitListView) {
+  return hParent->getBuffer()->unmapHostPtr(pMappedPtr, cmdList, waitListView);
 }
 
 ur_shared_mutex &ur_mem_sub_buffer_t::getMutex() {
@@ -519,16 +553,16 @@ ur_result_t urMemBufferCreate(ur_context_handle_t hContext,
     // ignore the flag for now.
   }
 
+  if (flags & UR_MEM_FLAG_USE_HOST_POINTER) {
+    // To speed up copies, we always import the host ptr to USM memory
+  }
+
   void *hostPtr = pProperties ? pProperties->pHost : nullptr;
-  auto accessMode = getDeviceAccessMode(flags);
+  auto accessMode = ur_mem_buffer_t::getDeviceAccessMode(flags);
 
   if (useHostBuffer(hContext)) {
-    auto hostPtrAction =
-        flags & UR_MEM_FLAG_USE_HOST_POINTER
-            ? ur_integrated_buffer_handle_t::host_ptr_action_t::import
-            : ur_integrated_buffer_handle_t::host_ptr_action_t::copy;
     *phBuffer = ur_mem_handle_t_::create<ur_integrated_buffer_handle_t>(
-        hContext, hostPtr, size, hostPtrAction, accessMode);
+        hContext, hostPtr, size, accessMode);
   } else {
     *phBuffer = ur_mem_handle_t_::create<ur_discrete_buffer_handle_t>(
         hContext, hostPtr, size, accessMode);
@@ -551,7 +585,7 @@ ur_result_t urMemBufferPartition(ur_mem_handle_t hMem, ur_mem_flags_t flags,
              pRegion->size <= hBuffer->getSize()),
             UR_RESULT_ERROR_INVALID_BUFFER_SIZE);
 
-  auto accessMode = getDeviceAccessMode(flags);
+  auto accessMode = ur_mem_buffer_t::getDeviceAccessMode(flags);
 
   UR_ASSERT(isAccessCompatible(accessMode, hBuffer->getDeviceAccessMode()),
             UR_RESULT_ERROR_INVALID_VALUE);
@@ -649,7 +683,7 @@ ur_result_t urMemGetInfo(ur_mem_handle_t hMem, ur_mem_info_t propName,
     return returnValue(size_t{hMem->getBuffer()->getSize()});
   }
   case UR_MEM_INFO_REFERENCE_COUNT: {
-    return returnValue(hMem->getObject()->RefCount.load());
+    return returnValue(hMem->RefCount.getCount());
   }
   default: {
     return UR_RESULT_ERROR_INVALID_ENUMERATION;
@@ -662,14 +696,14 @@ ur_result_t urMemGetInfo(ur_mem_handle_t hMem, ur_mem_info_t propName,
 }
 
 ur_result_t urMemRetain(ur_mem_handle_t hMem) try {
-  hMem->getObject()->RefCount.increment();
+  hMem->RefCount.retain();
   return UR_RESULT_SUCCESS;
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
 
 ur_result_t urMemRelease(ur_mem_handle_t hMem) try {
-  if (!hMem->getObject()->RefCount.decrementAndTest())
+  if (!hMem->RefCount.release())
     return UR_RESULT_SUCCESS;
 
   delete hMem;
@@ -691,9 +725,10 @@ ur_result_t urMemGetNativeHandle(ur_mem_handle_t hMem,
 
   std::scoped_lock<ur_shared_mutex> lock(hBuffer->getMutex());
 
+  wait_list_view emptyWaitListView(nullptr, 0);
   auto ptr = hBuffer->getDevicePtr(
       hDevice, ur_mem_buffer_t::device_access_mode_t::read_write, 0,
-      hBuffer->getSize(), nullptr);
+      hBuffer->getSize(), nullptr, emptyWaitListView);
   *phNativeMem = reinterpret_cast<ur_native_handle_t>(ptr);
   return UR_RESULT_SUCCESS;
 } catch (...) {

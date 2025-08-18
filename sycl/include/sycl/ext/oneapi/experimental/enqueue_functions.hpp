@@ -12,6 +12,7 @@
 
 #include <sycl/detail/common.hpp>
 #include <sycl/event.hpp>
+#include <sycl/ext/oneapi/experimental/enqueue_types.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
 #include <sycl/ext/oneapi/properties/properties.hpp>
 #include <sycl/handler.hpp>
@@ -97,23 +98,23 @@ template <typename LCRangeT, typename LCPropertiesT> struct LaunchConfigAccess {
 };
 
 template <typename CommandGroupFunc, typename PropertiesT>
-void submit_impl(queue &Q, PropertiesT Props, CommandGroupFunc &&CGF,
+void submit_impl(const queue &Q, PropertiesT Props, CommandGroupFunc &&CGF,
                  const sycl::detail::code_location &CodeLoc) {
   Q.submit_without_event<__SYCL_USE_FALLBACK_ASSERT>(
       Props, detail::type_erased_cgfo_ty{CGF}, CodeLoc);
 }
 
 template <typename CommandGroupFunc, typename PropertiesT>
-event submit_with_event_impl(queue &Q, PropertiesT Props,
+event submit_with_event_impl(const queue &Q, PropertiesT Props,
                              CommandGroupFunc &&CGF,
                              const sycl::detail::code_location &CodeLoc) {
   return Q.submit_with_event<__SYCL_USE_FALLBACK_ASSERT>(
-      Props, detail::type_erased_cgfo_ty{CGF}, nullptr, CodeLoc);
+      Props, detail::type_erased_cgfo_ty{CGF}, CodeLoc);
 }
 } // namespace detail
 
 template <typename CommandGroupFunc, typename PropertiesT>
-void submit(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
+void submit(const queue &Q, PropertiesT Props, CommandGroupFunc &&CGF,
             const sycl::detail::code_location &CodeLoc =
                 sycl::detail::code_location::current()) {
   sycl::ext::oneapi::experimental::detail::submit_impl(
@@ -121,15 +122,15 @@ void submit(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
 }
 
 template <typename CommandGroupFunc>
-void submit(queue Q, CommandGroupFunc &&CGF,
+void submit(const queue &Q, CommandGroupFunc &&CGF,
             const sycl::detail::code_location &CodeLoc =
                 sycl::detail::code_location::current()) {
-  submit(std::move(Q), empty_properties_t{},
-         std::forward<CommandGroupFunc>(CGF), CodeLoc);
+  submit(Q, empty_properties_t{}, std::forward<CommandGroupFunc>(CGF), CodeLoc);
 }
 
 template <typename CommandGroupFunc, typename PropertiesT>
-event submit_with_event(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
+event submit_with_event(const queue &Q, PropertiesT Props,
+                        CommandGroupFunc &&CGF,
                         const sycl::detail::code_location &CodeLoc =
                             sycl::detail::code_location::current()) {
   return sycl::ext::oneapi::experimental::detail::submit_with_event_impl(
@@ -137,10 +138,10 @@ event submit_with_event(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
 }
 
 template <typename CommandGroupFunc>
-event submit_with_event(queue Q, CommandGroupFunc &&CGF,
+event submit_with_event(const queue &Q, CommandGroupFunc &&CGF,
                         const sycl::detail::code_location &CodeLoc =
                             sycl::detail::code_location::current()) {
-  return submit_with_event(std::move(Q), empty_properties_t{},
+  return submit_with_event(Q, empty_properties_t{},
                            std::forward<CommandGroupFunc>(CGF), CodeLoc);
 }
 
@@ -369,15 +370,17 @@ void fill(sycl::queue Q, T *Ptr, const T &Pattern, size_t Count,
       CodeLoc);
 }
 
-inline void prefetch(handler &CGH, void *Ptr, size_t NumBytes) {
-  CGH.prefetch(Ptr, NumBytes);
+inline void prefetch(handler &CGH, void *Ptr, size_t NumBytes,
+                     prefetch_type Type = prefetch_type::device) {
+  CGH.prefetch(Ptr, NumBytes, Type);
 }
 
 inline void prefetch(queue Q, void *Ptr, size_t NumBytes,
+                     prefetch_type Type = prefetch_type::device,
                      const sycl::detail::code_location &CodeLoc =
                          sycl::detail::code_location::current()) {
   submit(
-      std::move(Q), [&](handler &CGH) { prefetch(CGH, Ptr, NumBytes); },
+      std::move(Q), [&](handler &CGH) { prefetch(CGH, Ptr, NumBytes, Type); },
       CodeLoc);
 }
 

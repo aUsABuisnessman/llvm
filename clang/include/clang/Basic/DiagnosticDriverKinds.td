@@ -74,7 +74,8 @@ def warn_drv_fp_accuracy_override : Warning <
   InGroup<FPAccOverride>;
 
 def err_drv_no_rocm_device_lib : Error<
-  "cannot find ROCm device library%select{| for %1| for ABI version %1}0; provide its path via "
+  "cannot find ROCm device library%select{| for %1| for ABI version %1"
+  "%select{|, which requires ROCm %3 or higher}2}0; provide its path via "
   "'--rocm-path' or '--rocm-device-lib-path', or pass '-nogpulib' to build "
   "without ROCm device library">;
 def err_drv_no_hip_runtime : Error<
@@ -126,7 +127,7 @@ def err_drv_no_sycl_libspirv : Error<
 def warn_flag_no_sycl_libspirv
     : Warning<"'-fno-sycl-libspirv' should not be used with target '%0'; "
               "libspirv is required for correct behavior">,
-      InGroup<NoLibspirvHipCuda>;
+      InGroup<UnsafeLibspirvNotLinked>;
 def err_drv_mix_cuda_hip : Error<
   "mixed CUDA and HIP compilation is not supported">;
 def err_drv_bad_target_id : Error<
@@ -141,9 +142,10 @@ def warn_drv_unsupported_option_for_offload_arch_req_feature : Warning<
   "ignoring '%0' option for offload arch '%1' as it is not currently supported "
   "there. Use it with an offload arch containing '%2' instead">,
   InGroup<OptionIgnored>;
-def warn_drv_unsupported_option_for_target : Warning<
-  "ignoring '%0' option as it is not currently supported for target '%1'">,
-  InGroup<OptionIgnored>;
+def warn_drv_unsupported_option_for_target
+    : Warning<"ignoring '%0' option as it is not currently supported for "
+              "target '%1'%select{|; only supported for host compilation}2">,
+      InGroup<OptionIgnored>;
 def warn_drv_unsupported_option_for_flang : Warning<
   "the argument '%0' is not supported for option '%1'. Mapping to '%1%2'">,
   InGroup<OptionIgnored>;
@@ -156,8 +158,8 @@ def warn_drv_unsupported_option_for_processor : Warning<
 def warn_drv_unsupported_openmp_library : Warning<
   "the library '%0=%1' is not supported, OpenMP will not be enabled">,
   InGroup<OptionIgnored>;
-def warn_openmp_experimental : Warning<
-  "OpenMP support in flang is still experimental">,
+def warn_openmp_incomplete : Warning<
+  "OpenMP support for version %0 in flang is still incomplete">,
   InGroup<ExperimentalOption>;
 
 def err_drv_invalid_thread_model_for_target : Error<
@@ -234,6 +236,9 @@ def err_drv_cannot_open_randomize_layout_seed_file : Error<
   "cannot read randomize layout seed file '%0'">;
 def err_drv_invalid_version_number : Error<
   "invalid version number in '%0'">;
+def err_drv_invalid_version_number_inferred
+    : Error<"invalid version number '%0' inferred from '%1'">;
+def err_drv_missing_version_number : Error<"missing version number in '%0'">;
 def err_drv_kcfi_arity_unsupported_target : Error<
   "target '%0' is unsupported by -fsanitize-kcfi-arity">;
 def err_drv_no_linker_llvm_support : Error<
@@ -464,8 +469,14 @@ def err_drv_print_header_env_var : Error<
   "environment variable CC_PRINT_HEADERS_%select{FORMAT|FILTERING}0 has invalid value %1">;
 def err_drv_print_header_env_var_combination : Error<
   "unsupported combination: CC_PRINT_HEADERS_FORMAT=%0 and CC_PRINT_HEADERS_FILTERING=%1">;
-def err_drv_print_header_env_var_combination_cc1 : Error<
+def err_drv_print_header_env_var_invalid_format : Error<
+  "environment variable CC_PRINT_HEADERS_FORMAT=%0 requires a compatible value for CC_PRINT_HEADERS_FILTERING">;
+def err_drv_print_header_cc1_invalid_combination : Error<
   "unsupported combination: -header-include-format=%0 and -header-include-filtering=%1">;
+def err_drv_print_header_cc1_invalid_filtering : Error<
+  "-header-include-filtering=%0 requires a compatible value for -header-include-format">;
+def err_drv_print_header_cc1_invalid_format : Error<
+  "-header-include-format=%0 requires a compatible value for -header-include-filtering">;
 
 def warn_O4_is_O3 : Warning<"-O4 is equivalent to -O3">, InGroup<Deprecated>;
 def warn_unsupported_fsycl_fp64_conv_emu_use : Warning<"'-fsycl-fp64-conv-emu' option is supported only for AOT compilation of Intel GPUs. It will be ignored for other targets">,
@@ -545,6 +556,9 @@ def warn_ignoring_value_using_default : Warning<
 def warn_drv_overriding_option : Warning<
   "overriding '%0' option with '%1'">,
   InGroup<DiagGroup<"overriding-option">>;
+def warn_drv_overriding_deployment_version
+    : Warning<"overriding deployment version from '%0' to '%1'">,
+      InGroup<DiagGroup<"overriding-deployment-version">>;
 def warn_drv_treating_input_as_cxx : Warning<
   "treating '%0' input as '%1' when in C++ mode, this behavior is deprecated">,
   InGroup<Deprecated>;
@@ -747,6 +761,10 @@ def note_drv_verify_prefix_spelling : Note<
   "-verify prefixes must start with a letter and contain only alphanumeric"
   " characters, hyphens, and underscores">;
 
+def note_command_line_code_loc_requirement
+    : Note<"-code-completion-at=<file>:<line>:<column> requires <line> and "
+           "<column> to be integers greater than zero">;
+
 def warn_drv_global_isel_incomplete : Warning<
   "-fglobal-isel support for the '%0' architecture is incomplete">,
   InGroup<GlobalISel>;
@@ -916,6 +934,9 @@ def note_drv_available_multilibs : Note<
   "available multilibs are:%0">;
 def err_drv_multilib_custom_error : Error<
   "multilib configuration error: %0">;
+def warn_drv_multilib_not_available_for_target: Warning<
+  "no multilib structure encoded for Arm, Aarch64 and PPC targets">,
+  InGroup<DiagGroup<"multilib-not-found">>;
 
 def err_drv_experimental_crel : Error<
   "-Wa,--allow-experimental-crel must be specified to use -Wa,--crel. "
@@ -935,4 +956,9 @@ def warn_missing_include_dirs : Warning<
 
 def err_drv_malformed_warning_suppression_mapping : Error<
   "failed to process suppression mapping file '%0': %1">;
+
+def warn_drv_openacc_without_cir
+    : Warning<"OpenACC directives will result in no runtime behavior; use "
+              "-fclangir to enable runtime effect">,
+      InGroup<SourceUsesOpenACC>;
 }
