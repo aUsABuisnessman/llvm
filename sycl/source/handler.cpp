@@ -41,6 +41,10 @@
 #include <sycl/ext/oneapi/experimental/work_group_memory.hpp>
 #include <sycl/ext/oneapi/memcpy2d.hpp>
 
+#ifdef XPTI_ENABLE_INSTRUMENTATION
+#include <detail/xpti_registry.hpp>
+#endif
+
 namespace sycl {
 inline namespace _V1 {
 
@@ -538,6 +542,38 @@ event handler::finalize() {
   }
 
   if (type == detail::CGType::Kernel) {
+    if (impl->MDeviceKernelInfoPtr) {
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
+      detail::CompileTimeKernelInfoTy HandlerInfo;
+      HandlerInfo.Name = MKernelName;
+      HandlerInfo.NumParams = impl->MKernelNumArgs;
+      HandlerInfo.ParamDescGetter = impl->MKernelParamDescGetter;
+      HandlerInfo.IsESIMD = impl->MKernelIsESIMD;
+      HandlerInfo.HasSpecialCaptures = impl->MKernelHasSpecialCaptures;
+
+      impl->MDeviceKernelInfoPtr->initIfEmpty(HandlerInfo);
+#endif
+    } else {
+      // Fetch the device kernel info pointer if it hasn't been set (e.g.
+      // in kernel bundle or free function cases).
+      impl->MDeviceKernelInfoPtr =
+          &detail::ProgramManager::getInstance().getOrCreateDeviceKernelInfo(
+              toKernelNameStrT(MKernelName));
+    }
+
+    detail::DeviceKernelInfo &Info = *impl->MDeviceKernelInfoPtr;
+    (void)Info;
+
+    // Make sure that information set by old binaries gets properly copied to
+    // the `DeviceKernelInfo` so that the rest of the code base could use it as
+    // the single source of all the data:
+    assert(MKernelName == static_cast<std::string_view>(Info.Name));
+    assert(static_cast<unsigned>(impl->MKernelNumArgs) == Info.NumParams);
+    assert(impl->MKernelParamDescGetter == Info.ParamDescGetter ||
+           impl->MKernelParamDescGetter == nullptr);
+    assert(impl->MKernelIsESIMD == Info.IsESIMD);
+    assert(impl->MKernelHasSpecialCaptures == Info.HasSpecialCaptures);
+
     // If there were uses of set_specialization_constant build the kernel_bundle
     detail::kernel_bundle_impl *KernelBundleImpPtr =
         getOrInsertHandlerKernelBundlePtr(/*Insert=*/false);
@@ -547,11 +583,11 @@ event handler::finalize() {
           !(MKernel && MKernel->isInterop()) &&
           (KernelBundleImpPtr->empty() ||
            KernelBundleImpPtr->hasSYCLOfflineImages()) &&
-          !KernelBundleImpPtr->tryGetKernel(toKernelNameStrT(MKernelName))) {
+          !KernelBundleImpPtr->tryGetKernel(impl->getKernelName())) {
         detail::device_impl &Dev = impl->get_device();
         kernel_id KernelID =
             detail::ProgramManager::getInstance().getSYCLKernelID(
-                toKernelNameStrT(MKernelName));
+                impl->getKernelName());
         bool KernelInserted = KernelBundleImpPtr->add_kernel(
             KernelID, detail::createSyclObjFromImpl<device>(Dev));
         // If kernel was not inserted and the bundle is in input mode we try
@@ -611,10 +647,8 @@ event handler::finalize() {
           !impl->MEventNeeded && impl->get_queue().supportsDiscardingPiEvents();
       if (DiscardEvent) {
         // Kernel only uses assert if it's non interop one
-        bool KernelUsesAssert =
-            !(MKernel && MKernel->isInterop()) &&
-            detail::ProgramManager::getInstance().kernelUsesAssert(
-                toKernelNameStrT(MKernelName), impl->MKernelNameBasedCachePtr);
+        bool KernelUsesAssert = !(MKernel && MKernel->isInterop()) &&
+                                impl->MDeviceKernelInfoPtr->usesAssert();
         DiscardEvent = !KernelUsesAssert;
       }
 
@@ -624,48 +658,45 @@ event handler::finalize() {
               : detail::event_impl::create_device_event(impl->get_queue());
 
 #ifdef XPTI_ENABLE_INSTRUMENTATION
-      const bool xptiEnabled = xptiTraceEnabled();
+      // Only enable instrumentation if there are subscribes to the SYCL stream
+      const bool xptiEnabled = xptiCheckTraceEnabled(detail::GSYCLStreamID);
 #endif
       auto EnqueueKernel = [&]() {
 #ifdef XPTI_ENABLE_INSTRUMENTATION
-        auto StreamID = xpti::invalid_id<xpti::stream_id_t>;
         xpti_td *CmdTraceEvent = nullptr;
         uint64_t InstanceID = 0;
         if (xptiEnabled) {
-          StreamID = xptiRegisterStream(detail::SYCL_STREAM_NAME);
           std::tie(CmdTraceEvent, InstanceID) = emitKernelInstrumentationData(
-              StreamID, MKernel, MCodeLoc, impl->MIsTopCodeLoc,
-              MKernelName.data(), impl->MKernelNameBasedCachePtr,
-              impl->get_queue_or_null(), impl->MNDRDesc, KernelBundleImpPtr,
-              impl->MArgs);
-          detail::emitInstrumentationGeneral(StreamID, InstanceID,
+              detail::GSYCLStreamID, MKernel, MCodeLoc, impl->MIsTopCodeLoc,
+              *impl->MDeviceKernelInfoPtr, impl->get_queue_or_null(),
+              impl->MNDRDesc, KernelBundleImpPtr, impl->MArgs);
+          detail::emitInstrumentationGeneral(detail::GSYCLStreamID, InstanceID,
                                              CmdTraceEvent,
                                              xpti::trace_task_begin, nullptr);
         }
 #endif
         const detail::RTDeviceBinaryImage *BinImage = nullptr;
         if (detail::SYCLConfig<detail::SYCL_JIT_AMDGCN_PTX_KERNELS>::get()) {
-          BinImage = detail::retrieveKernelBinary(
-              impl->get_queue(), toKernelNameStrT(MKernelName));
+          BinImage = detail::retrieveKernelBinary(impl->get_queue(),
+                                                  impl->getKernelName());
           assert(BinImage && "Failed to obtain a binary image.");
         }
         enqueueImpKernel(
             impl->get_queue(), impl->MNDRDesc, impl->MArgs, KernelBundleImpPtr,
-            MKernel.get(), toKernelNameStrT(MKernelName),
-            impl->MKernelNameBasedCachePtr, RawEvents, ResultEvent.get(),
-            nullptr, impl->MKernelCacheConfig, impl->MKernelIsCooperative,
-            impl->MKernelUsesClusterLaunch, impl->MKernelWorkGroupMemorySize,
-            BinImage, impl->MKernelFuncPtr, impl->MKernelNumArgs,
-            impl->MKernelParamDescGetter, impl->MKernelHasSpecialCaptures);
+            MKernel.get(), *impl->MDeviceKernelInfoPtr, RawEvents,
+            ResultEvent.get(), nullptr, impl->MKernelCacheConfig,
+            impl->MKernelIsCooperative, impl->MKernelUsesClusterLaunch,
+            impl->MKernelWorkGroupMemorySize, BinImage, impl->MKernelFuncPtr);
 #ifdef XPTI_ENABLE_INSTRUMENTATION
         if (xptiEnabled) {
           // Emit signal only when event is created
           if (!DiscardEvent) {
             detail::emitInstrumentationGeneral(
-                StreamID, InstanceID, CmdTraceEvent, xpti::trace_signal,
+                detail::GSYCLStreamID, InstanceID, CmdTraceEvent,
+                xpti::trace_signal,
                 static_cast<const void *>(ResultEvent->getHandle()));
           }
-          detail::emitInstrumentationGeneral(StreamID, InstanceID,
+          detail::emitInstrumentationGeneral(detail::GSYCLStreamID, InstanceID,
                                              CmdTraceEvent,
                                              xpti::trace_task_end, nullptr);
         }
@@ -712,10 +743,9 @@ event handler::finalize() {
     CommandGroup.reset(new detail::CGExecKernel(
         impl->MNDRDesc, std::move(MHostKernel), std::move(MKernel),
         std::move(impl->MKernelBundle), std::move(impl->CGData),
-        std::move(impl->MArgs), toKernelNameStrT(MKernelName),
-        impl->MKernelNameBasedCachePtr, std::move(MStreamStorage),
-        std::move(impl->MAuxiliaryResources), getType(),
-        impl->MKernelCacheConfig, impl->MKernelIsCooperative,
+        std::move(impl->MArgs), *impl->MDeviceKernelInfoPtr,
+        std::move(MStreamStorage), std::move(impl->MAuxiliaryResources),
+        getType(), impl->MKernelCacheConfig, impl->MKernelIsCooperative,
         impl->MKernelUsesClusterLaunch, impl->MKernelWorkGroupMemorySize,
         MCodeLoc));
     break;
@@ -2505,6 +2535,16 @@ bool handler::HasAssociatedAccessor(detail::AccessorImplHost *Req,
 void handler::setType(sycl::detail::CGType Type) { impl->MCGType = Type; }
 sycl::detail::CGType handler::getType() const { return impl->MCGType; }
 
+void handler::setDeviceKernelInfo(kernel &&Kernel) {
+  MKernel = detail::getSyclObjImpl(std::move(Kernel));
+  MKernelName = getKernelName();
+  setDeviceKernelInfoPtr(&MKernel->getDeviceKernelInfo());
+  setType(detail::CGType::Kernel);
+
+  // If any extra actions are added here make sure that logic around
+  // `lambdaAndKernelHaveEqualName` calls can handle that.
+}
+
 #ifndef __INTEL_PREVIEW_BREAKING_CHANGES
 void handler::setNDRangeDescriptorPadded(sycl::range<3> N,
                                          bool SetNumWorkGroups, int Dims) {
@@ -2594,9 +2634,18 @@ void handler::setNDRangeDescriptor(sycl::range<1> NumWorkItems,
   impl->MNDRDesc = NDRDescT{NumWorkItems, LocalSize, Offset};
 }
 
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
 void handler::setKernelNameBasedCachePtr(
     sycl::detail::KernelNameBasedCacheT *KernelNameBasedCachePtr) {
-  impl->MKernelNameBasedCachePtr = KernelNameBasedCachePtr;
+  setDeviceKernelInfoPtr(reinterpret_cast<sycl::detail::DeviceKernelInfo *>(
+      KernelNameBasedCachePtr));
+}
+#endif
+
+void handler::setDeviceKernelInfoPtr(
+    sycl::detail::DeviceKernelInfo *DeviceKernelInfoPtr) {
+  assert(!impl->MDeviceKernelInfoPtr && "Already set!");
+  impl->MDeviceKernelInfoPtr = DeviceKernelInfoPtr;
 }
 
 void handler::setKernelInfo(
