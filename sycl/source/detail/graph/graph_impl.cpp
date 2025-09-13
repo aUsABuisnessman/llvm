@@ -729,23 +729,22 @@ ur_exp_command_buffer_sync_point_t exec_graph_impl::enqueueNodeDirect(
 
 #ifdef XPTI_ENABLE_INSTRUMENTATION
   const bool xptiEnabled = xptiTraceEnabled();
-  auto StreamID = xpti::invalid_id<xpti::stream_id_t>;
   xpti_td *CmdTraceEvent = nullptr;
   uint64_t InstanceID = 0;
   if (xptiEnabled) {
-    StreamID = xptiRegisterStream(sycl::detail::SYCL_STREAM_NAME);
     sycl::detail::CGExecKernel *CGExec =
         static_cast<sycl::detail::CGExecKernel *>(Node.MCommandGroup.get());
     sycl::detail::code_location CodeLoc(CGExec->MFileName.c_str(),
                                         CGExec->MFunctionName.c_str(),
                                         CGExec->MLine, CGExec->MColumn);
     std::tie(CmdTraceEvent, InstanceID) = emitKernelInstrumentationData(
-        StreamID, CGExec->MSyclKernel, CodeLoc, CGExec->MIsTopCodeLoc,
-        CGExec->MKernelName.data(), CGExec->MKernelNameBasedCachePtr, nullptr,
+        sycl::detail::GSYCLStreamID, CGExec->MSyclKernel, CodeLoc,
+        CGExec->MIsTopCodeLoc, CGExec->MDeviceKernelInfo, nullptr,
         CGExec->MNDRDesc, CGExec->MKernelBundle.get(), CGExec->MArgs);
     if (CmdTraceEvent)
-      sycl::detail::emitInstrumentationGeneral(
-          StreamID, InstanceID, CmdTraceEvent, xpti::trace_task_begin, nullptr);
+      sycl::detail::emitInstrumentationGeneral(sycl::detail::GSYCLStreamID,
+                                               InstanceID, CmdTraceEvent,
+                                               xpti::trace_task_begin, nullptr);
   }
 #endif
 
@@ -765,8 +764,9 @@ ur_exp_command_buffer_sync_point_t exec_graph_impl::enqueueNodeDirect(
 
 #ifdef XPTI_ENABLE_INSTRUMENTATION
   if (xptiEnabled && CmdTraceEvent)
-    sycl::detail::emitInstrumentationGeneral(
-        StreamID, InstanceID, CmdTraceEvent, xpti::trace_task_end, nullptr);
+    sycl::detail::emitInstrumentationGeneral(sycl::detail::GSYCLStreamID,
+                                             InstanceID, CmdTraceEvent,
+                                             xpti::trace_task_end, nullptr);
 #endif
 
   return NewSyncPoint;
@@ -1400,14 +1400,14 @@ void exec_graph_impl::update(std::shared_ptr<graph_impl> GraphImpl) {
       sycl::detail::CGExecKernel *TargetCGExec =
           static_cast<sycl::detail::CGExecKernel *>(
               MNodeStorage[i]->MCommandGroup.get());
-      KernelNameStrRefT TargetKernelName = TargetCGExec->getKernelName();
+      std::string_view TargetKernelName = TargetCGExec->getKernelName();
 
       sycl::detail::CGExecKernel *SourceCGExec =
           static_cast<sycl::detail::CGExecKernel *>(
               GraphImpl->MNodeStorage[i]->MCommandGroup.get());
-      KernelNameStrRefT SourceKernelName = SourceCGExec->getKernelName();
+      std::string_view SourceKernelName = SourceCGExec->getKernelName();
 
-      if (TargetKernelName.compare(SourceKernelName) != 0) {
+      if (TargetKernelName != SourceKernelName) {
         std::stringstream ErrorStream(
             "Cannot update using a graph with mismatched kernel "
             "types. Source node type ");
@@ -1567,15 +1567,14 @@ void exec_graph_impl::populateURKernelUpdateStructs(
     UrKernel = Kernel->getHandleRef();
     EliminatedArgMask = Kernel->getKernelArgMask();
   } else if (auto SyclKernelImpl =
-                 KernelBundleImplPtr
-                     ? KernelBundleImplPtr->tryGetKernel(ExecCG.MKernelName)
-                     : std::shared_ptr<kernel_impl>{nullptr}) {
+                 KernelBundleImplPtr ? KernelBundleImplPtr->tryGetKernel(
+                                           ExecCG.MDeviceKernelInfo.Name)
+                                     : std::shared_ptr<kernel_impl>{nullptr}) {
     UrKernel = SyclKernelImpl->getHandleRef();
     EliminatedArgMask = SyclKernelImpl->getKernelArgMask();
   } else {
     BundleObjs = sycl::detail::ProgramManager::getInstance().getOrCreateKernel(
-        ContextImpl, DeviceImpl, ExecCG.MKernelName,
-        ExecCG.MKernelNameBasedCachePtr);
+        ContextImpl, DeviceImpl, ExecCG.MDeviceKernelInfo);
     UrKernel = BundleObjs->MKernelHandle;
     EliminatedArgMask = BundleObjs->MKernelArgMask;
   }
