@@ -166,6 +166,10 @@ class graph_impl;
 class dynamic_parameter_impl;
 } // namespace ext::oneapi::experimental::detail
 namespace detail {
+class buffer_impl;
+
+__SYCL_EXPORT void
+markBufferAsInternal(const std::shared_ptr<buffer_impl> &BufImpl);
 
 class type_erased_cgfo_ty {
   // From SYCL 2020,  command group function object:
@@ -491,9 +495,7 @@ private:
   template <class Kernel> void setDeviceKernelInfo(void *KernelFuncPtr) {
     constexpr auto Info = detail::CompileTimeKernelInfo<Kernel>;
     MKernelName = Info.Name;
-    // TODO support ESIMD in no-integration-header case too.
-    setKernelInfo(KernelFuncPtr, Info.NumParams, Info.ParamDescGetter,
-                  Info.IsESIMD, Info.HasSpecialCaptures);
+    setKernelFunc(KernelFuncPtr);
     setDeviceKernelInfoPtr(&detail::getDeviceKernelInfo<Kernel>());
     setType(detail::CGType::Kernel);
   }
@@ -510,24 +512,23 @@ private:
   extractArgsAndReqsFromLambda(char *LambdaPtr, size_t KernelArgsNum,
                                const detail::kernel_param_desc_t *KernelArgs,
                                bool IsESIMD);
-#endif
   /// Extracts and prepares kernel arguments from the lambda using information
   /// from the built-ins or integration header.
   void extractArgsAndReqsFromLambda(
       char *LambdaPtr, detail::kernel_param_desc_t (*ParamDescGetter)(int),
       size_t NumKernelParams, bool IsESIMD);
-
+#endif
   /// Extracts and prepares kernel arguments set via set_arg(s).
   void extractArgsAndReqs();
 
-#if defined(__INTEL_PREVIEW_BREAKING_CHANGES)
-  // TODO: processArg need not to be public
-  __SYCL_DLL_LOCAL
-#endif
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
+  // TODO: remove in the next ABI-breaking window.
   void processArg(void *Ptr, const detail::kernel_param_kind_t &Kind,
                   const int Size, const size_t Index, size_t &IndexShift,
                   bool IsKernelCreatedFromSource, bool IsESIMD);
+#endif
 
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
   /// \return a string containing name of SYCL kernel.
   detail::ABINeutralKernelNameStrT getKernelName();
 
@@ -543,6 +544,7 @@ private:
     detail::ABINeutralKernelNameStrT KernelName = getKernelName();
     return KernelName == LambdaName;
   }
+#endif
 
   /// Saves the location of user's code passed in \p CodeLoc for future usage in
   /// finalize() method.
@@ -875,6 +877,7 @@ private:
     }
   }
 
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
   void verifyDeviceHasProgressGuarantee(
       sycl::ext::oneapi::experimental::forward_progress_guarantee guarantee,
       sycl::ext::oneapi::experimental::execution_scope threadScope,
@@ -899,64 +902,7 @@ private:
   /// Stores information about kernel properties into the handler.
   template <typename PropertiesT>
   void processLaunchProperties(PropertiesT Props) {
-    if constexpr (PropertiesT::template has_property<
-                      sycl::ext::intel::experimental::cache_config_key>()) {
-      auto Config = Props.template get_property<
-          sycl::ext::intel::experimental::cache_config_key>();
-      if (Config == sycl::ext::intel::experimental::large_slm) {
-        setKernelCacheConfig(StableKernelCacheConfig::LargeSLM);
-      } else if (Config == sycl::ext::intel::experimental::large_data) {
-        setKernelCacheConfig(StableKernelCacheConfig::LargeData);
-      }
-    } else {
-      std::ignore = Props;
-    }
-
-    constexpr bool UsesRootSync = PropertiesT::template has_property<
-        sycl::ext::oneapi::experimental::use_root_sync_key>();
-    if (UsesRootSync) {
-      setKernelIsCooperative(UsesRootSync);
-    }
-    if constexpr (PropertiesT::template has_property<
-                      sycl::ext::oneapi::experimental::
-                          work_group_progress_key>()) {
-      auto prop = Props.template get_property<
-          sycl::ext::oneapi::experimental::work_group_progress_key>();
-      verifyDeviceHasProgressGuarantee(
-          prop.guarantee,
-          sycl::ext::oneapi::experimental::execution_scope::work_group,
-          prop.coordinationScope);
-    }
-    if constexpr (PropertiesT::template has_property<
-                      sycl::ext::oneapi::experimental::
-                          sub_group_progress_key>()) {
-      auto prop = Props.template get_property<
-          sycl::ext::oneapi::experimental::sub_group_progress_key>();
-      verifyDeviceHasProgressGuarantee(
-          prop.guarantee,
-          sycl::ext::oneapi::experimental::execution_scope::sub_group,
-          prop.coordinationScope);
-    }
-    if constexpr (PropertiesT::template has_property<
-                      sycl::ext::oneapi::experimental::
-                          work_item_progress_key>()) {
-      auto prop = Props.template get_property<
-          sycl::ext::oneapi::experimental::work_item_progress_key>();
-      verifyDeviceHasProgressGuarantee(
-          prop.guarantee,
-          sycl::ext::oneapi::experimental::execution_scope::work_item,
-          prop.coordinationScope);
-    }
-
-    if constexpr (PropertiesT::template has_property<
-                      sycl::ext::oneapi::experimental::
-                          work_group_scratch_size>()) {
-      auto WorkGroupMemSize = Props.template get_property<
-          sycl::ext::oneapi::experimental::work_group_scratch_size>();
-      setKernelWorkGroupMem(WorkGroupMemSize.size);
-    }
-
-    checkAndSetClusterRange(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(detail::extractKernelProperties(Props));
   }
 
   /// Process kernel properties.
@@ -971,23 +917,10 @@ private:
       bool IsESIMDKernel,
       typename PropertiesT = ext::oneapi::experimental::empty_properties_t>
   void processProperties(PropertiesT Props) {
-    static_assert(
-        ext::oneapi::experimental::is_property_list<PropertiesT>::value,
-        "Template type is not a property list.");
-    static_assert(
-        !PropertiesT::template has_property<
-            sycl::ext::intel::experimental::fp_control_key>() ||
-            (PropertiesT::template has_property<
-                 sycl::ext::intel::experimental::fp_control_key>() &&
-             IsESIMDKernel),
-        "Floating point control property is supported for ESIMD kernels only.");
-    static_assert(
-        !PropertiesT::template has_property<
-            sycl::ext::oneapi::experimental::indirectly_callable_key>(),
-        "indirectly_callable property cannot be applied to SYCL kernels");
-
-    processLaunchProperties(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(
+        detail::extractKernelProperties<IsESIMDKernel>(Props));
   }
+#endif // INTEL_PREVIEW_BREAKING_CHANGES
 
   /// Checks whether it is possible to copy the source shape to the destination
   /// shape(the shapes are described by the accessor ranges) by using
@@ -1295,8 +1228,13 @@ private:
                             decltype(Wrapper), TransformedArgType,
                             PropertiesT>::wrap(Wrapper);
 
-      detail::KernelLaunchPropertyWrapper::parseProperties<KName>(this,
-                                                                  Wrapper);
+      if constexpr (ext::oneapi::experimental::detail::
+                        HasKernelPropertiesGetMethod<
+                            decltype(Wrapper)>::value) {
+        SetKernelLaunchpropertiesIfNotEmpty(detail::extractKernelProperties(
+            Wrapper.get(ext::oneapi::experimental::properties_tag{})));
+      }
+
 #ifndef __SYCL_DEVICE_ONLY__
       verifyUsedKernelBundleInternal(Info.Name);
       // We are executing over the rounded range, but there are still
@@ -1320,11 +1258,19 @@ private:
       // kernel is generated
       detail::KernelWrapper<detail::WrapAs::parallel_for, NameT, KernelType,
                             TransformedArgType, PropertiesT>::wrap(KernelFunc);
-      detail::KernelLaunchPropertyWrapper::parseProperties<NameT>(this,
-                                                                  KernelFunc);
+
+      if constexpr (ext::oneapi::experimental::detail::
+                        HasKernelPropertiesGetMethod<
+                            const KernelType &>::value) {
+        SetKernelLaunchpropertiesIfNotEmpty(
+            detail::extractKernelProperties<Info.IsESIMD>(
+                KernelFunc.get(ext::oneapi::experimental::properties_tag{})));
+      }
+
 #ifndef __SYCL_DEVICE_ONLY__
       verifyUsedKernelBundleInternal(Info.Name);
-      processProperties<Info.IsESIMD, PropertiesT>(Props);
+      SetKernelLaunchpropertiesIfNotEmpty(
+          detail::extractKernelProperties<Info.IsESIMD>(Props));
       detail::checkValueRange<Dims>(UserRange);
       setNDRangeDescriptor(std::move(UserRange));
       StoreLambda<NameT, KernelType, Dims, TransformedArgType>(
@@ -1353,7 +1299,7 @@ private:
     setDeviceKernelInfo(std::move(Kernel));
     detail::checkValueRange<Dims>(NumWorkItems);
     setNDRangeDescriptor(std::move(NumWorkItems));
-    processLaunchProperties<PropertiesT>(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(detail::extractKernelProperties(Props));
     extractArgsAndReqs();
 #endif
   }
@@ -1376,7 +1322,7 @@ private:
     setDeviceKernelInfo(std::move(Kernel));
     detail::checkValueRange<Dims>(NDRange);
     setNDRangeDescriptor(std::move(NDRange));
-    processLaunchProperties(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(detail::extractKernelProperties(Props));
     extractArgsAndReqs();
 #endif
   }
@@ -1393,12 +1339,18 @@ private:
     using NameT =
         typename detail::get_kernel_name_t<KernelName, KernelType>::name;
     (void)Props;
+    constexpr auto Info = detail::CompileTimeKernelInfo<NameT>;
     detail::KernelWrapper<WrapAsVal, NameT, KernelType, ElementType,
                           PropertiesT>::wrap(KernelFunc);
-    detail::KernelLaunchPropertyWrapper::parseProperties<NameT>(this,
-                                                                KernelFunc);
+
+    if constexpr (ext::oneapi::experimental::detail::
+                      HasKernelPropertiesGetMethod<const KernelType &>::value) {
+      SetKernelLaunchpropertiesIfNotEmpty(
+          detail::extractKernelProperties<Info.IsESIMD>(
+              KernelFunc.get(ext::oneapi::experimental::properties_tag{})));
+    }
+
 #ifndef __SYCL_DEVICE_ONLY__
-    constexpr auto Info = detail::CompileTimeKernelInfo<NameT>;
     if constexpr (WrapAsVal == detail::WrapAs::single_task) {
       throwOnKernelParameterMisuse(Info);
     }
@@ -1414,7 +1366,8 @@ private:
     }
 
     StoreLambda<NameT, KernelType, Dims, ElementType>(std::move(KernelFunc));
-    processProperties<Info.IsESIMD, PropertiesT>(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(
+        detail::extractKernelProperties<Info.IsESIMD>(Props));
 #endif
   }
 
@@ -1437,8 +1390,13 @@ private:
     (void)Kernel;
     detail::KernelWrapper<WrapAsVal, NameT, KernelType, ElementType,
                           PropertiesT>::wrap(KernelFunc);
-    detail::KernelLaunchPropertyWrapper::parseProperties<NameT>(this,
-                                                                KernelFunc);
+
+    if constexpr (ext::oneapi::experimental::detail::
+                      HasKernelPropertiesGetMethod<const KernelType &>::value) {
+      SetKernelLaunchpropertiesIfNotEmpty(detail::extractKernelProperties(
+          KernelFunc.get(ext::oneapi::experimental::properties_tag{})));
+    }
+
 #ifndef __SYCL_DEVICE_ONLY__
     constexpr auto Info = detail::CompileTimeKernelInfo<NameT>;
     if constexpr (WrapAsVal == detail::WrapAs::single_task) {
@@ -1465,7 +1423,8 @@ private:
           "the kernel name must match the name of the lambda");
     }
     StoreLambda<NameT, KernelType, Dims, ElementType>(std::move(KernelFunc));
-    processProperties<Info.IsESIMD, PropertiesT>(Props);
+    SetKernelLaunchpropertiesIfNotEmpty(
+        detail::extractKernelProperties<Info.IsESIMD>(Props));
 #endif
   }
 #endif // __INTEL_PREVIEW_BREAKING_CHANGES
@@ -1897,6 +1856,10 @@ public:
                       Kernel);
   }
 
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
+  // Implementation for something that had to be removed long ago but now stuck
+  // until next major release...
+
   /// Defines and invokes a SYCL kernel function.
   ///
   /// \param Kernel is a SYCL kernel that is executed on a SYCL device
@@ -1904,6 +1867,7 @@ public:
   /// \param KernelFunc is a lambda that is used if device, queue is bound to,
   /// is a host device.
   template <typename KernelName = detail::auto_name, typename KernelType>
+  __SYCL_DEPRECATED("This overload isn't part of SYCL2020 and will be removed.")
   void single_task(kernel Kernel, const KernelType &KernelFunc) {
     // Ignore any set kernel bundles and use the one associated with the kernel
     setHandlerKernelBundle(Kernel);
@@ -1931,6 +1895,7 @@ public:
     detail::CheckDeviceCopyable<KernelType>();
 #endif
   }
+#endif // __INTEL_PREVIEW_BREAKING_CHANGES
 
 #ifndef __INTEL_PREVIEW_BREAKING_CHANGES
   /// Defines and invokes a SYCL kernel function for the specified range.
@@ -3482,7 +3447,9 @@ private:
                                       bool IsDeviceImageScoped, size_t NumBytes,
                                       size_t Offset);
 
-  // Changing values in this will break ABI/API.
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
+  // Modeled after ur_kernel_cache_config_t
+  // Used as an argument to setKernelCacheConfig that's part of the ABI.
   enum class StableKernelCacheConfig : int32_t {
     Default = 0,
     LargeSLM = 1,
@@ -3495,15 +3462,27 @@ private:
   void setKernelIsCooperative(bool);
 
   // Set using cuda thread block cluster launch flag and set the launch bounds.
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
   void setKernelClusterLaunch(sycl::range<3> ClusterSize, int Dims);
-#endif
   void setKernelClusterLaunch(sycl::range<3> ClusterSize);
   void setKernelClusterLaunch(sycl::range<2> ClusterSize);
   void setKernelClusterLaunch(sycl::range<1> ClusterSize);
 
   // Set the request work group memory size (work_group_static ext).
   void setKernelWorkGroupMem(size_t Size);
+#endif
+
+  void setKernelLaunchProperties(
+      const detail::KernelPropertyHolderStructTy &KernelLaunchProperties);
+
+  inline constexpr void SetKernelLaunchpropertiesIfNotEmpty(
+      const detail::KernelPropertyHolderStructTy &KernelLaunchProperties) {
+    (void)KernelLaunchProperties;
+
+#ifndef __SYCL_DEVICE_ONLY__
+    if (!KernelLaunchProperties.isEmpty())
+      setKernelLaunchProperties(KernelLaunchProperties);
+#endif
+  }
 
   // Various checks that are only meaningful for host compilation, because they
   // result in runtime errors (i.e. exceptions being thrown). To save time
@@ -3600,7 +3579,10 @@ private:
 
   void addArg(detail::kernel_param_kind_t ArgKind, void *Req, int AccessTarget,
               int ArgIndex);
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
+  // TODO: remove in the next ABI-breaking window
   void clearArgs();
+#endif
   void setArgsToAssociatedAccessors();
 
   bool HasAssociatedAccessor(detail::AccessorImplHost *Req,
@@ -3647,15 +3629,16 @@ private:
   void setNDRangeDescriptor(sycl::range<1> NumWorkItems, sycl::id<1> Offset);
   void setNDRangeDescriptor(sycl::range<1> NumWorkItems,
                             sycl::range<1> LocalSize, sycl::id<1> Offset);
-
+#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
   void setKernelInfo(void *KernelFuncPtr, int KernelNumArgs,
                      detail::kernel_param_desc_t (*KernelParamDescGetter)(int),
                      bool KernelIsESIMD, bool KernelHasSpecialCaptures);
+#endif
+  void setKernelFunc(void *KernelFuncPtr);
 
   void instantiateKernelOnHost(void *InstantiateKernelOnHostPtr);
 
   friend class detail::HandlerAccess;
-  friend struct detail::KernelLaunchPropertyWrapper;
 
 #ifdef __INTEL_PREVIEW_BREAKING_CHANGES
   __SYCL_DLL_LOCAL detail::handler_impl *get_impl() { return impl; }

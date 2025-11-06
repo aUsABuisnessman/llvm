@@ -8,14 +8,9 @@
 // CHECK-NEXT: access/access.hpp
 // CHECK-NEXT: detail/defines_elementary.hpp
 // CHECK-NEXT: backend_types.hpp
-// CHECK-NEXT: stl_wrappers/cstdlib
 // CHECK-NEXT: detail/array.hpp
 // CHECK-NEXT: detail/common.hpp
-// CHECK-NEXT: exception.hpp
 // CHECK-NEXT: detail/export.hpp
-// CHECK-NEXT: detail/string.hpp
-// CHECK-NEXT: stl_wrappers/cassert
-// CHECK-NEXT: stl_wrappers/assert.h
 // CHECK-NEXT: __spirv/spirv_vars.hpp
 // CHECK-NEXT: detail/fwd/accessor.hpp
 // CHECK-NEXT: detail/defines.hpp
@@ -34,6 +29,8 @@
 // CHECK-NEXT: detail/os_util.hpp
 // CHECK-NEXT: ext/oneapi/accessor_property_list.hpp
 // CHECK-NEXT: detail/property_list_base.hpp
+// CHECK-NEXT: exception.hpp
+// CHECK-NEXT: detail/string.hpp
 // CHECK-NEXT: property_list.hpp
 // CHECK-NEXT: properties/property_traits.hpp
 // CHECK-NEXT: id.hpp
