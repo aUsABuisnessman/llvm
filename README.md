@@ -1,7 +1,24 @@
 This is the Intel staging area for llvm.org contributions and the home for
 Intel LLVM-based projects:
 
-- [oneAPI DPC++ compiler](#oneapi-dpc-compiler)
+if (CandidateChainsMayContainExtraStores) {
++        // The legality of adding extra stores to ExtendingLoadsStores has
++        // already been checked, but if the candidate chain contains extra
++        // stores from an earlier optimization, confirm legality now.
++        // This filter is essential because, when filling gaps in
++        // splitChainByContinuity, we queried the API to check that (for a given
++        // element type and address space) there *may* be a legal masked store
++        // we can try to create. Now, we need to check if the actual chain we
++        // ended up with is legal to turn into a masked store.
++        // This is relevant for NVPTX targets, for example, where a masked store
++        // is only legal if we have ended up with a 256-bit vector.
++        bool CandidateChainContainsExtraStores = llvm::any_of(
++            ArrayRef<ChainElem>(C).slice(CBegin, CEnd - CBegin + 1),
++            [this](const ChainElem &E) {
++              return ExtraElements.contains(E.Inst);
++            });
+
+-)
 - [Late-outline OpenMP and OpenMP Offload](#late-outline-openmp-and-openmp-offload)
 
 For general contribution process see [CONTRIBUTING.md](./CONTRIBUTING.md)
