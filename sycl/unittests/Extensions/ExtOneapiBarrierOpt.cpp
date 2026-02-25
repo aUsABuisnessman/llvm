@@ -6,7 +6,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <detail/queue_impl.hpp>
 #include <gtest/gtest.h>
 #include <helpers/ScopedEnvVar.hpp>
 #include <helpers/UrMock.hpp>
@@ -40,11 +39,6 @@ protected:
 TEST_F(ExtOneapiBarrierOptTest, EmptyEventTest) {
   sycl::queue q1{{sycl::property::queue::in_order()}};
 
-  // To avoid current optimizations for empty queues, we trick q1 into thinking
-  // that it isn't empty.
-  int dummyInt = 0;
-  q1.prefetch(&dummyInt, sizeof(int));
-
   mock::getCallbacks().set_after_callback(
       "urEnqueueEventsWaitWithBarrierExt",
       &redefinedEnqueueEventsWaitWithBarrierExt);
@@ -54,13 +48,11 @@ TEST_F(ExtOneapiBarrierOptTest, EmptyEventTest) {
   ASSERT_EQ(0u, NumEventsInWaitList);
 
   // ext_oneapi_submit_barrier should ignore empty, default constructed events.
+  // Spec says that ext_oneapi_submit_barrier({E1}) should submit a barrier
+  // that's blocked on E1. But if E1 is empty event, SYCL RT will ignore it and
+  // won't make the UR call at all.
   sycl::event E1{};
   NumEventsInWaitList = 100;
   q1.ext_oneapi_submit_barrier({E1});
-  ASSERT_EQ(0u, NumEventsInWaitList);
-
-  sycl::event E2{};
-  NumEventsInWaitList = 100;
-  q1.ext_oneapi_submit_barrier({E1, E2});
-  ASSERT_EQ(0u, NumEventsInWaitList);
+  ASSERT_EQ(100u, NumEventsInWaitList);
 }

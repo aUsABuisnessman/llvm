@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Intel Corporation
+// Copyright (C) 2024-2026 Intel Corporation
 // Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
 // See LICENSE.TXT
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -16,6 +16,7 @@ let chartObserver; // Intersection observer for lazy loading charts
 let annotationsOptions = new Map(); // Global options map for annotations
 let archivedDataLoaded = false;
 let loadedBenchmarkRuns = []; // Loaded results from the js/json files
+let isInitializing = true; // Flag for a proper handling of URLs
 // Global variables loaded from data.js/data.json:
 // - benchmarkRuns: array of benchmark run data
 // - benchmarkMetadata: metadata for benchmarks and groups
@@ -63,7 +64,9 @@ const toggleConfigs = {
             document.querySelectorAll('.benchmark-note').forEach(note => {
                 note.style.display = isEnabled ? 'block' : 'none';
             });
-            updateURL();
+            if (!isInitializing) {
+                updateURL();
+            }
         }
     },
     'show-unstable': {
@@ -97,7 +100,9 @@ const toggleConfigs = {
                     location.reload();
                 }
             }
-            updateURL();
+            if (!isInitializing) {
+                updateURL();
+            }
         }
     }
     ,
@@ -111,7 +116,9 @@ const toggleConfigs = {
             updateFlameGraphTooltip();
             // Refresh download buttons to adapt to new mode
             refreshDownloadButtons();
-            updateURL();
+            if (!isInitializing) {
+                updateURL();
+            }
         }
     }
 };
@@ -1016,7 +1023,10 @@ function updateURL() {
         url.searchParams.delete('regex');
     }
 
-    if (activeSuites.length > 0 && activeSuites.length != suiteNames.size) {
+    // Include suites parameter if not all suites are selected
+    // OR if the original URL had a suites parameter (preserve user's explicit selection)
+    const hadSuitesParam = getQueryParam('suites') !== null;
+    if (activeSuites.length > 0 && (activeSuites.length != suiteNames.size || hadSuitesParam)) {
         url.searchParams.set('suites', activeSuites.join(','));
     } else {
         url.searchParams.delete('suites');
@@ -1085,7 +1095,10 @@ function filterCharts() {
         container.classList.toggle('hidden', !shouldShow);
     });
 
-    updateURL();
+    // Don't update URL during initial page load to preserve URL parameters
+    if (!isInitializing) {
+        updateURL();
+    }
 }
 
 function getActiveSuites() {
@@ -1746,6 +1759,12 @@ function initializeCharts() {
 
     // Draw initial charts
     updateCharts();
+
+    // Mark initialization as complete - URL parameters have been applied
+    isInitializing = false;
+
+    // Update the URL to ensure it reflects the final state after initialization
+    updateURL();
 }
 
 // Make functions available globally for onclick handlers
@@ -1771,14 +1790,15 @@ function fetchAndProcessData(url, isArchived = false) {
                 window.benchmarkMetadata = data.benchmarkMetadata || data.metadata || {};
                 window.benchmarkTags = data.benchmarkTags || data.tags || {};
                 window.flamegraphData = (data.flamegraphData && data.flamegraphData.runs) ? data.flamegraphData : { runs: {} };
-                if (Array.isArray(data.defaultCompareNames)) {
+                if (Array.isArray(data.defaultCompareNames) && (!defaultCompareNames || defaultCompareNames.length === 0)) {
                     defaultCompareNames = data.defaultCompareNames;
                 }
                 console.log('Remote data loaded (normalized):', {
                     runs: runsArray.length,
                     metadata: Object.keys(window.benchmarkMetadata).length,
                     tags: Object.keys(window.benchmarkTags).length,
-                    flamegraphs: Object.keys(window.flamegraphData.runs).length
+                    flamegraphs: Object.keys(window.flamegraphData.runs).length,
+                    defaultCompareNames: defaultCompareNames
                 });
             }
 
@@ -1919,7 +1939,7 @@ function displaySelectedRunsPlatformInfo() {
         .map(runName => {
             const run = loadedBenchmarkRuns.find(r => r.name === runName);
             if (run && run.platform) {
-                return { name: runName, platform: run.platform };
+                return { name: runName, platform: run.platform, date: run.date };
             }
             return null;
         })
@@ -1939,7 +1959,7 @@ function displaySelectedRunsPlatformInfo() {
         const platform = runData.platform;
         const detailsContainer = document.createElement('div');
         detailsContainer.className = 'platform-details-compact';
-        detailsContainer.innerHTML = createPlatformDetailsHTML(platform);
+        detailsContainer.innerHTML = createPlatformDetailsHTML(platform, runData.date);
         runSection.appendChild(detailsContainer);
         container.appendChild(runSection);
     });
@@ -1947,9 +1967,9 @@ function displaySelectedRunsPlatformInfo() {
 
 // Platform Information Functions
 
-function createPlatformDetailsHTML(platform) {
-    const formattedTimestamp = platform.timestamp ?
-        new Date(platform.timestamp).toLocaleString('en-US', {
+function createPlatformDetailsHTML(platform, run_date) {
+    const formattedTimestamp = run_date ?
+        new Date(run_date).toLocaleString('en-US', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',

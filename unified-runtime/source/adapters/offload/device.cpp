@@ -1,6 +1,6 @@
 //===----------- device.cpp - LLVM Offload Adapter  -----------------------===//
 //
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2025-2026 Intel Corporation
 //
 // Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
 // Exceptions. See LICENSE.TXT
@@ -53,7 +53,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
   case UR_DEVICE_INFO_VERSION:
     return ReturnValue("");
   case UR_DEVICE_INFO_EXTENSIONS:
-    return ReturnValue("");
+    // todo: use offload API to query supported extensions
+    return ReturnValue("cl_khr_il_program");
   case UR_DEVICE_INFO_USE_NATIVE_ASSERT:
     return ReturnValue(false);
   case UR_DEVICE_INFO_TYPE:
@@ -223,6 +224,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
   case UR_DEVICE_INFO_ESIMD_SUPPORT:
   case UR_DEVICE_INFO_SUB_GROUP_INDEPENDENT_FORWARD_PROGRESS:
   case UR_DEVICE_INFO_ERROR_CORRECTION_SUPPORT:
+  case UR_DEVICE_INFO_USM_P2P_SUPPORT_EXP:
+  case UR_DEVICE_INFO_USM_CONTEXT_MEMCPY_SUPPORT_EXP:
   // TODO: Atomic queries in Offload
   case UR_DEVICE_INFO_ATOMIC_64:
   case UR_DEVICE_INFO_IMAGE_SRGB:
@@ -239,6 +242,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
         ur_queue_flags_t{UR_QUEUE_FLAG_OUT_OF_ORDER_EXEC_MODE_ENABLE});
   case UR_DEVICE_INFO_QUEUE_ON_DEVICE_PROPERTIES:
     return ReturnValue(0);
+  case UR_DEVICE_INFO_DYNAMIC_LINK_SUPPORT_EXP:
+    return ReturnValue(false);
   case UR_DEVICE_INFO_KERNEL_LAUNCH_CAPABILITIES:
     return ReturnValue(0);
   case UR_DEVICE_INFO_SUPPORTED_PARTITIONS: {
@@ -279,6 +284,9 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
   }
   case UR_DEVICE_INFO_LOCAL_MEM_SIZE: {
     return ReturnValue(size_t{0});
+  }
+  case UR_DEVICE_INFO_DEVICE_WAIT_SUPPORT_EXP: {
+    return ReturnValue(ur_bool_t{false});
   }
 
   // The following properties are lifted from the minimum supported
@@ -352,6 +360,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
   case UR_DEVICE_INFO_MAX_WRITE_IMAGE_ARGS:
   case UR_DEVICE_INFO_MAX_SAMPLERS:
     return ReturnValue(uint32_t{0});
+  case UR_DEVICE_INFO_ENQUEUE_HOST_TASK_SUPPORT_EXP:
+    return ReturnValue(false);
   default:
     return UR_RESULT_ERROR_UNSUPPORTED_ENUMERATION;
   }
@@ -449,6 +459,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceSelectBinary(
     ImageTarget = UR_DEVICE_BINARY_TARGET_NVPTX64;
   } else if (Backend == OL_PLATFORM_BACKEND_AMDGPU) {
     ImageTarget = UR_DEVICE_BINARY_TARGET_AMDGCN;
+  } else if (Backend == OL_PLATFORM_BACKEND_LEVEL_ZERO) {
+    ImageTarget = UR_DEVICE_BINARY_TARGET_SPIRV64;
   }
 
   for (uint32_t i = 0; i < NumBinaries; ++i) {
@@ -493,5 +505,9 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceCreateWithNativeHandle(
 
 UR_APIEXPORT ur_result_t UR_APICALL
 urDeviceGetGlobalTimestamps(ur_device_handle_t, uint64_t *, uint64_t *) {
+  return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
+}
+
+UR_APIEXPORT ur_result_t UR_APICALL urDeviceWaitExp(ur_device_handle_t) {
   return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
 }

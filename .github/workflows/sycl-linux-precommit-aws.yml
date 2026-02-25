@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: aws
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           sparse-checkout: devops/actions/aws-ec2
       - run: npm install ./devops/actions/aws-ec2
@@ -63,6 +63,9 @@ jobs:
   e2e-cuda:
     needs: [aws-start]
     uses: ./.github/workflows/sycl-linux-run-tests.yml
+    permissions:
+      contents: write
+      packages: read
     with:
       name: CUDA E2E
       runner: '["aws_cuda-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}"]'
@@ -76,6 +79,9 @@ jobs:
       toolchain_artifact: sycl_linux_default
       toolchain_artifact_filename: llvm_sycl.tar.zst
       toolchain_decompress_command: zstd
+
+      # The AWS runner is not set up to use vulkan and it's out of our control.
+      extra_lit_opts: --filter-out bindless_images/vulkan_interop
 
   update-check:
     needs: [create-check, e2e-cuda]
@@ -109,7 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: aws
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           sparse-checkout: devops/actions/aws-ec2
       - run: npm install ./devops/actions/aws-ec2

@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
 # See LICENSE.TXT
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -28,7 +28,8 @@ class GromacsBench(Suite):
         return "https://gitlab.com/gromacs/gromacs.git"
 
     def git_tag(self):
-        return "v2025.2"
+        # 29 Aug, 2025
+        return "v2025.3"
 
     def grappa_url(self):
         return "https://zenodo.org/record/11234002/files/grappa-1.5k-6.1M_rc0.9.tar.gz"
@@ -57,12 +58,15 @@ class GromacsBench(Suite):
                 self.git_tag(),
                 Path(options.workdir),
                 "gromacs",
-                force_rebuild=True,
+                use_installdir=False,
             )
 
         # TODO: Detect the GPU architecture and set the appropriate flags
 
         # Build GROMACS
+        if options.offline:
+            log.info(f"Rebuilding {self.project.name} skipped")
+            return
 
         self.oneapi = get_oneapi()
 
@@ -83,8 +87,12 @@ class GromacsBench(Suite):
         if options.unitrace:
             extra_args.append("-DGMX_USE_ITT=ON")
 
-        self.project.configure(extra_args, install_prefix=False, add_sycl=True)
-        self.project.build(add_sycl=True, ld_library=self.oneapi.ld_libraries())
+        if self.project.needs_rebuild():
+            self.project.configure(extra_args, add_sycl=True)
+            self.project.build(add_sycl=True, ld_library=self.oneapi.ld_libraries())
+        else:
+            log.info(f"Rebuilding {self.project.name} skipped")
+
         download(
             options.workdir,
             self.grappa_url(),
@@ -93,10 +101,11 @@ class GromacsBench(Suite):
             untar=True,
         )
 
-    def teardown(self):
-        pass
 
-
+# FIXME: This benchmark is disabled in "Full" and "Normal" presets due to CI issues:
+# - OneApi version seems to be incompatible with Gromacs build, even if 2025.3 was used...
+#
+# If you wish to run this benchmark (e.g. for debugging), use preset "Gromacs".
 class GromacsBenchmark(Benchmark):
     def __init__(self, suite, model, type, option):
         self.suite = suite
@@ -169,6 +178,7 @@ class GromacsBenchmark(Benchmark):
     ) -> list[Result]:
         model_dir = self.grappa_dir / self.model
 
+        env_vars = dict(env_vars) if env_vars else {}
         env_vars.update({"SYCL_CACHE_PERSISTENT": "1"})
 
         if self.option == "graphs":
@@ -274,6 +284,3 @@ class GromacsBenchmark(Benchmark):
                         )
 
         raise ValueError(f"Conserved Energy Drift not found in log file: {log_file}")
-
-    def teardown(self):
-        pass

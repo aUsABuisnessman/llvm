@@ -43,19 +43,13 @@ ur_result_t getProviderNativeError(const char *providerName,
 
 static std::optional<usm::DisjointPoolAllConfigs>
 initializeDisjointPoolConfig() {
-  const char *UrRetDisable = std::getenv("UR_L0_DISABLE_USM_ALLOCATOR");
-  const char *PiRetDisable =
-      std::getenv("SYCL_PI_LEVEL_ZERO_DISABLE_USM_ALLOCATOR");
-  const char *Disable =
-      UrRetDisable ? UrRetDisable : (PiRetDisable ? PiRetDisable : nullptr);
-  if (Disable != nullptr && Disable != std::string("")) {
+  if (getenv_tobool("UR_L0_DISABLE_USM_ALLOCATOR") ||
+      getenv_tobool("SYCL_PI_LEVEL_ZERO_DISABLE_USM_ALLOCATOR")) {
     return std::nullopt;
   }
 
-  const char *PoolUrTraceVal = std::getenv("UR_L0_USM_ALLOCATOR_TRACE");
-
   int PoolTrace = 0;
-  if (PoolUrTraceVal != nullptr) {
+  if (auto PoolUrTraceVal = std::getenv("UR_L0_USM_ALLOCATOR_TRACE")) {
     PoolTrace = std::atoi(PoolUrTraceVal);
   }
 
@@ -64,14 +58,7 @@ initializeDisjointPoolConfig() {
     return usm::DisjointPoolAllConfigs(PoolTrace);
   }
 
-  // TODO: rework parseDisjointPoolConfig to return optional,
-  // once EnableBuffers is no longer used (by legacy L0)
-  auto configs = usm::parseDisjointPoolConfig(PoolUrConfigVal, PoolTrace);
-  if (configs.EnableBuffers) {
-    return configs;
-  }
-
-  return std::nullopt;
+  return usm::parseDisjointPoolConfigOptional(PoolUrConfigVal, PoolTrace);
 }
 
 inline umf_usm_memory_type_t urToUmfMemoryType(ur_usm_type_t type) {
@@ -356,29 +343,21 @@ std::optional<std::pair<void *, ur_event_handle_t>>
 ur_usm_pool_handle_t_::allocateEnqueued(ur_context_handle_t hContext,
                                         void *hQueue, bool isInOrderQueue,
                                         ur_device_handle_t hDevice,
-                                        const ur_usm_desc_t *pUSMDesc,
                                         ur_usm_type_t type, size_t size) {
-  uint32_t alignment = pUSMDesc ? pUSMDesc->align : 0;
-  if ((alignment & (alignment - 1)) != 0) {
-    return std::nullopt;
-  }
-
-  auto deviceFlags = getDeviceFlags(pUSMDesc);
-
-  auto umfPool = getPool(usm::pool_descriptor{
-      this, hContext, hDevice, type,
-      bool(deviceFlags & UR_USM_DEVICE_MEM_FLAG_DEVICE_READ_ONLY)});
+  auto umfPool =
+      getPool(usm::pool_descriptor{this, hContext, hDevice, type, false});
   if (!umfPool) {
     return std::nullopt;
   }
 
-  auto allocation = umfPool->asyncPool.getBestFit(size, alignment, hQueue);
+  auto allocation = umfPool->asyncPool.getBestFit(size, hQueue);
   if (!allocation) {
     return std::nullopt;
   }
 
-  if (allocation->Queue == hQueue && isInOrderQueue && allocation->Event) {
-    allocation->Event->release();
+  if (allocation->Queue == hQueue && isInOrderQueue) {
+    if (allocation->Event)
+      allocation->Event->release();
     return std::make_pair(allocation->Ptr, nullptr);
   } else {
     return std::make_pair(allocation->Ptr, allocation->Event);

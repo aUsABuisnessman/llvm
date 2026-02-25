@@ -1,4 +1,4 @@
-# Copyright (C) 2024-2025 Intel Corporation
+# Copyright (C) 2024-2026 Intel Corporation
 # Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
 # See LICENSE.TXT
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -8,6 +8,7 @@ import csv
 from pathlib import Path
 
 from .base import Benchmark, Suite, TracingType
+from utils.logger import log
 from utils.result import Result
 from options import options
 from git_project import GitProject
@@ -24,6 +25,7 @@ class SyclBench(Suite):
         return "https://github.com/unisa-hpc/sycl-bench.git"
 
     def git_hash(self) -> str:
+        # 21 Feb, 2025
         return "31fc70be6266193c4ba60eb1fe3ce26edee4ca5b"
 
     def setup(self) -> None:
@@ -36,8 +38,12 @@ class SyclBench(Suite):
                 self.git_hash(),
                 Path(options.workdir),
                 "sycl-bench",
-                force_rebuild=True,
+                use_installdir=False,
             )
+
+        if not self.project.needs_rebuild():
+            log.info(f"Rebuilding {self.project.name} skipped")
+            return
 
         extra_args = [
             f"-DCMAKE_CXX_COMPILER={options.sycl}/bin/clang++",
@@ -53,7 +59,7 @@ class SyclBench(Suite):
                 f"-DCMAKE_CXX_FLAGS=-fsycl -fsycl-targets=amdgcn-amd-amdhsa -Xsycl-target-backend --offload-arch={options.hip_arch}"
             ]
 
-        self.project.configure(extra_args, install_prefix=False, add_sycl=True)
+        self.project.configure(extra_args, add_sycl=True)
         self.project.build(add_sycl=True)
 
     def benchmarks(self) -> list[Benchmark]:
@@ -98,15 +104,15 @@ class SyclBench(Suite):
 
 
 class SyclBenchmark(Benchmark):
-    def __init__(self, bench, name, test):
-        super().__init__(bench)
-        self.bench = bench
+    def __init__(self, suite: SyclBench, name: str, test: str):
+        super().__init__(suite)
+        self.suite = suite
         self.bench_name = name
         self.test = test
 
     @property
     def benchmark_bin(self) -> Path:
-        return self.bench.project.build_dir / self.bench_name
+        return self.suite.project.build_dir / self.bench_name
 
     def enabled(self) -> bool:
         return options.sycl is not None
@@ -145,6 +151,7 @@ class SyclBenchmark(Benchmark):
         ]
 
         command += self.bin_args()
+        env_vars = dict(env_vars) if env_vars else {}
         env_vars.update(self.extra_env_vars())
 
         # no output to stdout, all in outputfile
@@ -165,8 +172,8 @@ class SyclBenchmark(Benchmark):
                             command=command,
                             env=env_vars,
                             unit="ms",
-                            git_url=self.bench.git_url(),
-                            git_hash=self.bench.git_hash(),
+                            git_url=self.suite.git_url(),
+                            git_hash=self.suite.git_hash(),
                         )
                     )
 
@@ -175,10 +182,7 @@ class SyclBenchmark(Benchmark):
         return res_list
 
     def name(self):
-        return f"{self.bench.name()} {self.test}"
-
-    def teardown(self):
-        return
+        return f"{self.suite.name()} {self.test}"
 
 
 # multi benchmarks
