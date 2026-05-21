@@ -3,6 +3,8 @@ name: Zizmor
 on:
   workflow_dispatch:
   push:
+    branches:
+      - sycl
     # Although workflow files (.yml) should only be placed in the
     # .github/workflows directory, composite actions may be placed anywhere.
     # Here in intel/llvm composite actions are placed in the devops/actions
@@ -10,6 +12,12 @@ on:
     # .github/workflows directory. Therefore limiting the scanning to only these
     # directories. BUT we may consider scanning the entire repository to enhance
     # security.
+    paths:
+      - '.github/workflows/**/*.yml'
+      - 'devops/actions/**/*.yml'
+  pull_request:
+    branches:
+      - sycl
     paths:
       - '.github/workflows/**/*.yml'
       - 'devops/actions/**/*.yml'
@@ -24,7 +32,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -32,4 +40,4 @@ jobs:
             devops/actions/**/*.yml
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@e673c3917a1aef3c65c972347ed84ccd013ecda4 # v0.2.0
+        uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1

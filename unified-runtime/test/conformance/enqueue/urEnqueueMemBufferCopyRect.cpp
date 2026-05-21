@@ -1,11 +1,12 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include "helpers.h"
+#include "uur/fixtures.h"
 #include "uur/known_failure.h"
 #include <numeric>
+#include <uur/raii.h>
 
 static std::vector<uur::test_parameters_t> generateParameterizations() {
   std::vector<uur::test_parameters_t> parameterizations;
@@ -70,12 +71,13 @@ static std::vector<uur::test_parameters_t> generateParameterizations() {
 }
 
 struct urEnqueueMemBufferCopyRectTestWithParam
-    : public uur::urQueueTestWithParam<uur::test_parameters_t> {};
+    : public uur::urMultiQueueTypeTestWithParam<uur::test_parameters_t> {};
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueMemBufferCopyRectTestWithParam,
     testing::ValuesIn(generateParameterizations()),
-    uur::printRectTestString<urEnqueueMemBufferCopyRectTestWithParam>);
+    uur::printRectTestStringMultiQueue<
+        urEnqueueMemBufferCopyRectTestWithParam>);
 
 TEST_P(urEnqueueMemBufferCopyRectTestWithParam, Success) {
   const auto name = getParam().name;
@@ -143,9 +145,9 @@ TEST_P(urEnqueueMemBufferCopyRectTestWithParam, Success) {
   ASSERT_SUCCESS(urMemRelease(dst_buffer));
 }
 
-struct urEnqueueMemBufferCopyRectTest : uur::urQueueTest {
+struct urEnqueueMemBufferCopyRectTest : uur::urMultiQueueTypeTest {
   void SetUp() override {
-    UUR_RETURN_ON_FATAL_FAILURE(urQueueTest::SetUp());
+    UUR_RETURN_ON_FATAL_FAILURE(uur::urMultiQueueTypeTest::SetUp());
     ASSERT_SUCCESS(urMemBufferCreate(context, UR_MEM_FLAG_WRITE_ONLY, size,
                                      nullptr, &src_buffer));
     ASSERT_SUCCESS(urMemBufferCreate(context, UR_MEM_FLAG_READ_ONLY, size,
@@ -162,7 +164,7 @@ struct urEnqueueMemBufferCopyRectTest : uur::urQueueTest {
     if (src_buffer) {
       EXPECT_SUCCESS(urMemRelease(dst_buffer));
     }
-    urQueueTest::TearDown();
+    uur::urMultiQueueTypeTest::TearDown();
   }
 
   const size_t count = 1024;
@@ -178,7 +180,7 @@ struct urEnqueueMemBufferCopyRectTest : uur::urQueueTest {
   const size_t dst_row_pitch = size;
   size_t dst_slice_pitch = size;
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urEnqueueMemBufferCopyRectTest);
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(urEnqueueMemBufferCopyRectTest);
 
 TEST_P(urEnqueueMemBufferCopyRectTest, InvalidNullHandleQueue) {
   ASSERT_EQ_RESULT(UR_RESULT_ERROR_INVALID_NULL_HANDLE,
@@ -212,14 +214,14 @@ TEST_P(urEnqueueMemBufferCopyRectTest, InvalidNullPtrEventWaitList) {
                        src_region, size, size, size, size, 1, nullptr, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
-  ur_event_handle_t validEvent;
-  ASSERT_SUCCESS(urEnqueueEventsWait(queue, 0, nullptr, &validEvent));
+  uur::raii::Event eventDummy = nullptr;
+  ASSERT_SUCCESS(uur::MakeDummyEventForWaitList(context, eventDummy.ptr()));
 
-  ASSERT_EQ_RESULT(urEnqueueMemBufferCopyRect(queue, src_buffer, dst_buffer,
-                                              src_origin, dst_origin,
-                                              src_region, size, size, size,
-                                              size, 0, &validEvent, nullptr),
-                   UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
+  ASSERT_EQ_RESULT(
+      urEnqueueMemBufferCopyRect(queue, src_buffer, dst_buffer, src_origin,
+                                 dst_origin, src_region, size, size, size, size,
+                                 0, eventDummy.ptr(), nullptr),
+      UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
   ur_event_handle_t inv_evt = nullptr;
   ASSERT_EQ_RESULT(urEnqueueMemBufferCopyRect(queue, src_buffer, dst_buffer,
@@ -227,8 +229,6 @@ TEST_P(urEnqueueMemBufferCopyRectTest, InvalidNullPtrEventWaitList) {
                                               src_region, size, size, size,
                                               size, 1, &inv_evt, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
-
-  ASSERT_SUCCESS(urEventRelease(validEvent));
 }
 TEST_P(urEnqueueMemBufferCopyRectTest, InvalidSize) {
   UUR_KNOWN_FAILURE_ON(uur::NativeCPU{});
@@ -326,7 +326,7 @@ TEST_P(urEnqueueMemBufferCopyRectMultiDeviceTest, CopyRectReadDifferentQueues) {
       size, size, size, 0, nullptr, nullptr));
 
   // Wait for the queue to finish executing.
-  ASSERT_SUCCESS(urEnqueueEventsWait(queues[0], 0, nullptr, nullptr));
+  ASSERT_SUCCESS(urQueueFinish(queues[0]));
 
   // Then the remaining queues do blocking reads from the buffer. Since the
   // queues target different devices this checks that any devices memory has

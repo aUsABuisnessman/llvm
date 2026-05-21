@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // We want to use %{run-unfiltered-devices} for this test, it's easier if it's
 // limited to SPIR-V target.
 // REQUIRES: target-spir
@@ -42,7 +44,7 @@ std::string getInclude(int val) {
   return
       R"""(
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 inline constexpr int VAL = )""" +
       std::to_string(val) + ";\n";
 }

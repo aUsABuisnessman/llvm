@@ -1,20 +1,20 @@
-// Copyright (C) 2025 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 // RUN: %maybe-v1 ./mem_buffer_create_with_native_handle-test
 // RUN: %maybe-v2 ./mem_buffer_create_with_native_handle-test
 
-#include "ur_api.h"
+#include "unified-runtime/ur_api.h"
 #include "uur/checks.h"
 #include "uur/raii.h"
 #include "ze_api.h"
 #include <uur/fixtures.h>
 
-using urMemBufferCreateWithNativeHandleTest = uur::urQueueTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urMemBufferCreateWithNativeHandleTest);
+using urMemBufferCreateWithNativeHandleTest = uur::urMultiQueueTypeTest;
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
+    urMemBufferCreateWithNativeHandleTest);
 
 TEST_P(urMemBufferCreateWithNativeHandleTest, SharedBufferIsUsedDirectly) {
   UUR_KNOWN_FAILURE_ON(uur::LevelZero{});

@@ -1,11 +1,12 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include "helpers.h"
+#include "uur/fixtures.h"
 #include <numeric>
 #include <uur/known_failure.h>
+#include <uur/raii.h>
 
 // Choose parameters so that we get good coverage and catch some edge cases.
 static std::vector<uur::test_parameters_t> generateParameterizations() {
@@ -71,12 +72,13 @@ static std::vector<uur::test_parameters_t> generateParameterizations() {
 }
 
 struct urEnqueueMemBufferReadRectTestWithParam
-    : public uur::urQueueTestWithParam<uur::test_parameters_t> {};
+    : public uur::urMultiQueueTypeTestWithParam<uur::test_parameters_t> {};
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueMemBufferReadRectTestWithParam,
     testing::ValuesIn(generateParameterizations()),
-    uur::printRectTestString<urEnqueueMemBufferReadRectTestWithParam>);
+    uur::printRectTestStringMultiQueue<
+        urEnqueueMemBufferReadRectTestWithParam>);
 
 TEST_P(urEnqueueMemBufferReadRectTestWithParam, Success) {
   UUR_KNOWN_FAILURE_ON(uur::LevelZero{}, uur::LevelZeroV2{});
@@ -132,7 +134,7 @@ struct urEnqueueMemBufferReadRectTest : public uur::urMemBufferQueueTest {
   size_t host_slice_pitch = size;
 };
 
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urEnqueueMemBufferReadRectTest);
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(urEnqueueMemBufferReadRectTest);
 
 TEST_P(urEnqueueMemBufferReadRectTest, InvalidNullHandleQueue) {
   std::vector<uint32_t> dst(count);
@@ -173,13 +175,14 @@ TEST_P(urEnqueueMemBufferReadRectTest, InvalidNullPtrEventWaitList) {
                        host_slice_pitch, dst.data(), 1, nullptr, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
-  ur_event_handle_t validEvent;
-  ASSERT_SUCCESS(urEnqueueEventsWait(queue, 0, nullptr, &validEvent));
+  uur::raii::Event eventDummy = nullptr;
+  ASSERT_SUCCESS(uur::MakeDummyEventForWaitList(context, eventDummy.ptr()));
 
   ASSERT_EQ_RESULT(urEnqueueMemBufferReadRect(
                        queue, buffer, true, buffer_offset, host_offset, region,
                        buffer_row_pitch, buffer_slice_pitch, host_row_pitch,
-                       host_slice_pitch, dst.data(), 0, &validEvent, nullptr),
+                       host_slice_pitch, dst.data(), 0, eventDummy.ptr(),
+                       nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
   ur_event_handle_t invalidEvent = nullptr;
@@ -188,8 +191,6 @@ TEST_P(urEnqueueMemBufferReadRectTest, InvalidNullPtrEventWaitList) {
                        buffer_row_pitch, buffer_slice_pitch, host_row_pitch,
                        host_slice_pitch, dst.data(), 1, &invalidEvent, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
-
-  ASSERT_SUCCESS(urEventRelease(validEvent));
 }
 
 TEST_P(urEnqueueMemBufferReadRectTest, InvalidSize) {

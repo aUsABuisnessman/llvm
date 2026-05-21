@@ -10,7 +10,7 @@
 #pragma once
 
 #include <sycl/ext/oneapi/experimental/common_annotated_properties/properties.hpp>
-#include <sycl/ext/oneapi/properties/properties.hpp> // for properties_t
+#include <sycl/ext/oneapi/properties.hpp> // for properties_t
 #include <sycl/usm/usm_enums.hpp>
 
 #include <type_traits> // for false_type, con...
@@ -53,27 +53,6 @@ template <sycl::usm::alloc Kind>
 struct PropertyMetaInfo<usm_kind_key::value_t<Kind>> {
   static constexpr const char *name = "sycl-usm-kind";
   static constexpr sycl::usm::alloc value = Kind;
-};
-
-template <typename PropertyListT, sycl::usm::alloc Kind>
-inline constexpr bool is_usm_kind = []() constexpr {
-  if constexpr (PropertyListT::template has_property<usm_kind_key>())
-    return PropertyListT::template get_property<usm_kind_key>() ==
-           usm_kind<Kind>;
-  else
-    return false;
-}();
-
-template <typename PropertyListT>
-struct IsUsmKindDevice
-    : std::bool_constant<is_usm_kind<PropertyListT, sycl::usm::alloc::device>> {
-};
-template <typename PropertyListT>
-struct IsUsmKindHost
-    : std::bool_constant<is_usm_kind<PropertyListT, sycl::usm::alloc::host>> {};
-template <typename PropertyListT>
-struct IsUsmKindShared
-    : std::bool_constant<is_usm_kind<PropertyListT, sycl::usm::alloc::shared>> {
 };
 } // namespace detail
 

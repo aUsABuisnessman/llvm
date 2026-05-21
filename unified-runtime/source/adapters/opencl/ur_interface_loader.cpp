@@ -1,16 +1,15 @@
 //===--------- ur_interface_loader.cpp - Unified Runtime  ------------===//
 //
-// Copyright (C) 2023 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "common.hpp"
-#include <ur_api.h>
-#include <ur_ddi.h>
+#include <unified-runtime/ur_api.h>
+#include <unified-runtime/ur_ddi.h>
 
 namespace {
 
@@ -134,14 +133,11 @@ UR_DLLEXPORT ur_result_t UR_APICALL urGetKernelProcAddrTable(
   pDdiTable->pfnGetSubGroupInfo = urKernelGetSubGroupInfo;
   pDdiTable->pfnRelease = urKernelRelease;
   pDdiTable->pfnRetain = urKernelRetain;
-  pDdiTable->pfnSetArgLocal = urKernelSetArgLocal;
-  pDdiTable->pfnSetArgMemObj = urKernelSetArgMemObj;
-  pDdiTable->pfnSetArgPointer = urKernelSetArgPointer;
-  pDdiTable->pfnSetArgSampler = urKernelSetArgSampler;
-  pDdiTable->pfnSetArgValue = urKernelSetArgValue;
   pDdiTable->pfnSetExecInfo = urKernelSetExecInfo;
   pDdiTable->pfnSetSpecializationConstants = urKernelSetSpecializationConstants;
   pDdiTable->pfnGetSuggestedLocalWorkSize = urKernelGetSuggestedLocalWorkSize;
+  pDdiTable->pfnGetSuggestedLocalWorkSizeWithArgs =
+      urKernelGetSuggestedLocalWorkSizeWithArgs;
   pDdiTable->pfnSuggestMaxCooperativeGroupCount =
       urKernelSuggestMaxCooperativeGroupCount;
   return UR_RESULT_SUCCESS;
@@ -194,7 +190,6 @@ UR_DLLEXPORT ur_result_t UR_APICALL urGetEnqueueProcAddrTable(
   pDdiTable->pfnEventsWait = urEnqueueEventsWait;
   pDdiTable->pfnEventsWaitWithBarrier = urEnqueueEventsWaitWithBarrier;
   pDdiTable->pfnEventsWaitWithBarrierExt = urEnqueueEventsWaitWithBarrierExt;
-  pDdiTable->pfnKernelLaunch = urEnqueueKernelLaunch;
   pDdiTable->pfnMemBufferCopy = urEnqueueMemBufferCopy;
   pDdiTable->pfnMemBufferCopyRect = urEnqueueMemBufferCopyRect;
   pDdiTable->pfnMemBufferFill = urEnqueueMemBufferFill;
@@ -305,6 +300,8 @@ UR_DLLEXPORT ur_result_t UR_APICALL urGetCommandBufferExpProcAddrTable(
   pDdiTable->pfnReleaseExp = urCommandBufferReleaseExp;
   pDdiTable->pfnFinalizeExp = urCommandBufferFinalizeExp;
   pDdiTable->pfnAppendKernelLaunchExp = urCommandBufferAppendKernelLaunchExp;
+  pDdiTable->pfnAppendKernelLaunchWithArgsExp =
+      urCommandBufferAppendKernelLaunchWithArgsExp;
   pDdiTable->pfnAppendUSMMemcpyExp = urCommandBufferAppendUSMMemcpyExp;
   pDdiTable->pfnAppendUSMFillExp = urCommandBufferAppendUSMFillExp;
   pDdiTable->pfnAppendMemBufferCopyExp = urCommandBufferAppendMemBufferCopyExp;
@@ -445,6 +442,7 @@ UR_DLLEXPORT ur_result_t UR_APICALL urGetEnqueueExpProcAddrTable(
   pDdiTable->pfnNativeCommandExp = urEnqueueNativeCommandExp;
   pDdiTable->pfnCommandBufferExp = urEnqueueCommandBufferExp;
   pDdiTable->pfnKernelLaunchWithArgsExp = urEnqueueKernelLaunchWithArgsExp;
+  pDdiTable->pfnGraphExp = urEnqueueGraphExp;
 
   return UR_RESULT_SUCCESS;
 }
@@ -479,6 +477,38 @@ UR_DLLEXPORT ur_result_t UR_APICALL urGetProgramExpProcAddrTable(
   return UR_RESULT_SUCCESS;
 }
 
+UR_APIEXPORT ur_result_t UR_APICALL urGetQueueExpProcAddrTable(
+    ur_api_version_t version, ur_queue_exp_dditable_t *pDdiTable) {
+  auto result = validateProcInputs(version, pDdiTable);
+  if (UR_RESULT_SUCCESS != result) {
+    return result;
+  }
+
+  pDdiTable->pfnBeginGraphCaptureExp = urQueueBeginGraphCaptureExp;
+  pDdiTable->pfnBeginCaptureIntoGraphExp = urQueueBeginCaptureIntoGraphExp;
+  pDdiTable->pfnEndGraphCaptureExp = urQueueEndGraphCaptureExp;
+  pDdiTable->pfnIsGraphCaptureEnabledExp = urQueueIsGraphCaptureEnabledExp;
+  pDdiTable->pfnGetGraphExp = urQueueGetGraphExp;
+
+  return UR_RESULT_SUCCESS;
+}
+
+UR_APIEXPORT ur_result_t UR_APICALL urGetGraphExpProcAddrTable(
+    ur_api_version_t version, ur_graph_exp_dditable_t *pDdiTable) {
+  auto result = validateProcInputs(version, pDdiTable);
+  if (UR_RESULT_SUCCESS != result) {
+    return result;
+  }
+  pDdiTable->pfnCreateExp = urGraphCreateExp;
+  pDdiTable->pfnInstantiateGraphExp = urGraphInstantiateGraphExp;
+  pDdiTable->pfnDestroyExp = urGraphDestroyExp;
+  pDdiTable->pfnExecutableGraphDestroyExp = urGraphExecutableGraphDestroyExp;
+  pDdiTable->pfnIsEmptyExp = urGraphIsEmptyExp;
+  pDdiTable->pfnDumpContentsExp = urGraphDumpContentsExp;
+
+  return UR_RESULT_SUCCESS;
+}
+
 UR_DLLEXPORT ur_result_t UR_APICALL urAllAddrTable(ur_api_version_t version,
                                                    ur_dditable_t *pDdiTable) {
   urGetAdapterProcAddrTable(version, &pDdiTable->Adapter);
@@ -489,6 +519,7 @@ UR_DLLEXPORT ur_result_t UR_APICALL urAllAddrTable(ur_api_version_t version,
   urGetEnqueueExpProcAddrTable(version, &pDdiTable->EnqueueExp);
   urGetIPCExpProcAddrTable(version, &pDdiTable->IPCExp);
   urGetEventProcAddrTable(version, &pDdiTable->Event);
+  urGetGraphExpProcAddrTable(version, &pDdiTable->GraphExp);
   urGetKernelProcAddrTable(version, &pDdiTable->Kernel);
   urGetMemProcAddrTable(version, &pDdiTable->Mem);
   urGetPhysicalMemProcAddrTable(version, &pDdiTable->PhysicalMem);
@@ -496,6 +527,7 @@ UR_DLLEXPORT ur_result_t UR_APICALL urAllAddrTable(ur_api_version_t version,
   urGetProgramProcAddrTable(version, &pDdiTable->Program);
   urGetProgramExpProcAddrTable(version, &pDdiTable->ProgramExp);
   urGetQueueProcAddrTable(version, &pDdiTable->Queue);
+  urGetQueueExpProcAddrTable(version, &pDdiTable->QueueExp);
   urGetSamplerProcAddrTable(version, &pDdiTable->Sampler);
   urGetUSMProcAddrTable(version, &pDdiTable->USM);
   urGetUSMExpProcAddrTable(version, &pDdiTable->USMExp);

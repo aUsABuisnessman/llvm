@@ -9,11 +9,10 @@ from templates import helper as th
     X=x.upper()
 %>/*
  *
- * Copyright (C) 2022 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
  * Exceptions.
- * See LICENSE.TXT
+ * See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -56,9 +55,13 @@ namespace ur_loader
             if (platform.initStatus != ${X}_RESULT_SUCCESS)
                 continue;
 
+            auto *${th.make_pfn_name(n, tags, obj)} = platform.dditable.${th.get_table_name(n, tags, obj)}.${th.make_pfn_name(n, tags, obj)};
+            if (*${th.make_pfn_name(n, tags, obj)} == nullptr)
+                return ${X}_RESULT_ERROR_UNINITIALIZED;
+
             uint32_t adapter;
             ur_adapter_handle_t *adapterHandle = numAdapters < NumEntries ? &${obj['params'][1]['name']}[numAdapters] : nullptr;
-            platform.dditable.${th.get_table_name(n, tags, obj)}.${th.make_pfn_name(n, tags, obj)}( 1, adapterHandle, &adapter );
+            ${th.make_pfn_name(n, tags, obj)}( 1, adapterHandle, &adapter );
 
             numAdapters += adapter;
         }
@@ -129,6 +132,7 @@ ${tbl['export']['name']}(
 
         if(platform.initStatus != ${X}_RESULT_SUCCESS)
             continue;
+
         auto getTable = reinterpret_cast<${tbl['pfn']}>(
             ur_loader::LibLoader::getFunctionPtr(platform.handle.get(), "${tbl['export']['name']}"));
         if(!getTable)

@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2025 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -36,27 +35,37 @@ std::shared_ptr<ShadowMemory> GetShadowMemory(ur_context_handle_t Context,
 }
 
 ur_result_t ShadowMemoryCPU::Setup() {
-  static ur_result_t URes = [this]() {
-    ShadowBegin = 0x100000000000ULL;
-    ShadowEnd = 0x300000000000ULL;
-    if (MmapFixedNoReserve(ShadowBegin, ShadowEnd - ShadowBegin) == 0)
-      return UR_RESULT_ERROR_OUT_OF_HOST_MEMORY;
-    DontCoredumpRange(ShadowBegin, ShadowEnd - ShadowBegin);
+  if (ShadowBegin != 0)
     return UR_RESULT_SUCCESS;
-  }();
-  return URes;
+
+  bool Initialized;
+
+  ShadowBegin = 0x100000000000ULL;
+  ShadowEnd = ShadowBegin + GetShadowSize();
+  if (MmapFixedNoReserve(ShadowBegin, ShadowEnd - ShadowBegin)) {
+    DontCoredumpRange(ShadowBegin, ShadowEnd - ShadowBegin);
+    Initialized = true;
+  } else {
+    ShadowBegin = ShadowEnd = 0;
+    Initialized = false;
+  }
+
+  if (!Initialized) {
+    TryReExecWithoutASLR();
+    die("Device ThreadSanitizer failed to reserve shadow memory since shadow "
+        "memory interleaves with an existing mapping.");
+  }
+  return UR_RESULT_SUCCESS;
 }
 
 ur_result_t ShadowMemoryCPU::Destroy() {
   if (ShadowBegin == 0 && ShadowEnd == 0)
     return UR_RESULT_SUCCESS;
-  static ur_result_t URes = [this]() {
-    if (!Munmap(ShadowBegin, ShadowEnd - ShadowBegin))
-      return UR_RESULT_ERROR_UNKNOWN;
-    ShadowBegin = ShadowEnd = 0;
-    return UR_RESULT_SUCCESS;
-  }();
-  return URes;
+
+  if (!Munmap(ShadowBegin, ShadowEnd - ShadowBegin))
+    return UR_RESULT_ERROR_UNKNOWN;
+  ShadowBegin = ShadowEnd = 0;
+  return UR_RESULT_SUCCESS;
 }
 
 RawShadow *ShadowMemoryCPU::MemToShadow(uptr Addr) {
@@ -175,8 +184,8 @@ ur_result_t ShadowMemoryGPU::CleanShadow(ur_queue_handle_t Queue, uptr Ptr,
   }
 
   // Initialize to zero
-  auto URes = EnqueueUSMSet(Queue, (void *)Begin, (char)0,
-                            Size / kShadowCell * kShadowCnt * kShadowSize);
+  auto URes = EnqueueUSMSetZero(Queue, (void *)Begin,
+                                Size / kShadowCell * kShadowCnt * kShadowSize);
   if (URes != UR_RESULT_SUCCESS) {
     UR_LOG_L(getContext()->logger, ERR, "EnqueueUSMBlockingSet(): {}", URes);
     return URes;
@@ -203,13 +212,12 @@ ur_result_t ShadowMemoryGPU::AllocLocalShadow(ur_queue_handle_t Queue,
       LastAllocatedSize = 0;
     }
 
-    UR_CALL(getContext()->urDdiTable.USM.pfnDeviceAlloc(
-        Context, Device, nullptr, nullptr, RequiredShadowSize,
-        (void **)&LocalShadowOffset));
+    UR_CALL(SafeAllocate(Context, Device, RequiredShadowSize, nullptr, nullptr,
+                         AllocType::DEVICE_USM, (void **)&LocalShadowOffset));
 
     // Initialize shadow memory
     ur_result_t URes =
-        EnqueueUSMSet(Queue, (void *)LocalShadowOffset, 0, RequiredShadowSize);
+        EnqueueUSMSetZero(Queue, (void *)LocalShadowOffset, RequiredShadowSize);
     if (URes != UR_RESULT_SUCCESS) {
       UR_CALL(getContext()->urDdiTable.USM.pfnFree(Context,
                                                    (void *)LocalShadowOffset));

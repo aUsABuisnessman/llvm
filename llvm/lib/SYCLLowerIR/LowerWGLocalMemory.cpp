@@ -9,14 +9,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/SYCLLowerIR/LowerWGLocalMemory.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Pass.h"
-#include "llvm/SYCLLowerIR/SYCLUtils.h"
 #include "llvm/TargetParser/Triple.h"
-#include "llvm/Transforms/Utils/Cloning.h"
 
 using namespace llvm;
 
@@ -30,6 +27,7 @@ static constexpr char DYNAMIC_LOCALMEM_GV[] =
     "__sycl_dynamicLocalMemoryPlaceholder_GV";
 static constexpr char WORK_GROUP_STATIC_ATTR[] = "sycl-work-group-static";
 static constexpr char WORK_GROUP_STATIC_ARG_ATTR[] = "sycl-implicit-local-arg";
+static constexpr char WORK_GROUP_SCRATCH_ATTR[] = "sycl-work-group-scratch";
 
 namespace {
 class SYCLLowerWGLocalMemoryLegacy : public ModulePass {
@@ -81,6 +79,20 @@ sycl::getKernelNamesUsingImplicitLocalMem(const Module &M) {
   return SPIRKernelNames;
 }
 
+SmallVector<StringRef>
+sycl::getKernelNamesUsingWorkGroupDynamicMem(const Module &M) {
+  SmallVector<StringRef> SPIRKernelNames;
+  llvm::for_each(M.functions(), [&](const Function &F) {
+    // PTX_Kernel covers CUDA targets.
+    if ((F.getCallingConv() == CallingConv::SPIR_KERNEL ||
+         F.getCallingConv() == CallingConv::PTX_Kernel) &&
+        F.hasFnAttribute(WORK_GROUP_SCRATCH_ATTR)) {
+      SPIRKernelNames.emplace_back(F.getName());
+    }
+  });
+  return SPIRKernelNames;
+}
+
 char SYCLLowerWGLocalMemoryLegacy::ID = 0;
 INITIALIZE_PASS(SYCLLowerWGLocalMemoryLegacy, "sycllowerwglocalmemory",
                 "Replace __sycl_allocateLocalMemory with allocation of memory "
@@ -89,44 +101,6 @@ INITIALIZE_PASS(SYCLLowerWGLocalMemoryLegacy, "sycllowerwglocalmemory",
 
 ModulePass *llvm::createSYCLLowerWGLocalMemoryLegacyPass() {
   return new SYCLLowerWGLocalMemoryLegacy();
-}
-
-// In sycl header __sycl_allocateLocalMemory builtin call is wrapped in
-// group_local_memory/group_local_memory_for_overwrite functions, which must be
-// inlined first before each __sycl_allocateLocalMemory call can be lowered to a
-// distinct global variable. Inlining them here so that this pass doesn't have
-// implicit dependency on AlwaysInlinerPass.
-//
-// syclcompat::local_mem, which represents a distinct allocation, calls
-// group_local_memory_for_overwrite. So local_mem should be inlined as well.
-static bool inlineGroupLocalMemoryFunc(Module &M) {
-  Function *ALMFunc = M.getFunction(SYCL_ALLOCLOCALMEM_CALL);
-  if (!ALMFunc || ALMFunc->use_empty())
-    return false;
-
-  SmallVector<Function *, 4> WorkList{ALMFunc};
-  DenseSet<Function *> Visited;
-  while (!WorkList.empty()) {
-    auto *F = WorkList.pop_back_val();
-    for (auto *U : make_early_inc_range(F->users())) {
-      auto *CI = cast<CallInst>(U);
-      auto *Caller = CI->getFunction();
-      // Frontend propagates sycl-forceinline attribute to SYCL_EXTERNAL
-      // function which directly calls group_local_memory_for_overwrite.
-      // Don't inline the SYCL_EXTERNAL function.
-      if (Caller->hasFnAttribute("sycl-forceinline") &&
-          !sycl::utils::isSYCLExternalFunction(Caller) &&
-          Visited.insert(Caller).second)
-        WorkList.push_back(Caller);
-      if (F != ALMFunc) {
-        InlineFunctionInfo IFI;
-        [[maybe_unused]] auto Result = InlineFunction(*CI, IFI);
-        assert(Result.isSuccess() && "inlining failed");
-      }
-    }
-  }
-
-  return !Visited.empty();
 }
 
 // TODO: It should be checked that __sycl_allocateLocalMemory (or its source
@@ -184,7 +158,7 @@ lowerDynamicLocalMemCallDirect(CallInst *CI, Triple TT,
 
 static void lowerLocalMemCall(Function *LocalMemAllocFunc,
                               std::function<void(CallInst *CI)> TransformCall) {
-  static SmallPtrSet<Function *, 16> FuncsCache;
+  SmallPtrSet<Function *, 16> FuncsCache;
   SmallVector<CallInst *, 4> DelCalls;
   for (User *U : LocalMemAllocFunc->users()) {
     auto *CI = cast<CallInst>(U);
@@ -209,6 +183,12 @@ static void lowerLocalMemCall(Function *LocalMemAllocFunc,
       if (F->getCallingConv() == CallingConv::SPIR_KERNEL &&
           !F->hasFnAttribute(WORK_GROUP_STATIC_ATTR))
         F->addFnAttr(WORK_GROUP_STATIC_ATTR);
+
+      if ((F->getCallingConv() == CallingConv::SPIR_KERNEL ||
+           F->getCallingConv() == CallingConv::PTX_Kernel) &&
+          LocalMemAllocFunc->getName() == SYCL_DYNAMIC_LOCALMEM_CALL &&
+          !F->hasFnAttribute(WORK_GROUP_SCRATCH_ATTR))
+        F->addFnAttr(WORK_GROUP_SCRATCH_ATTR);
 
       for (auto *FU : F->users()) {
         if (auto *UCI = dyn_cast<CallInst>(FU)) {
@@ -392,8 +372,7 @@ static bool dynamicWGLocalMemory(Module &M) {
 
 PreservedAnalyses SYCLLowerWGLocalMemoryPass::run(Module &M,
                                                   ModuleAnalysisManager &) {
-  bool Changed = inlineGroupLocalMemoryFunc(M);
-  Changed |= allocaWGLocalMemory(M);
+  bool Changed = allocaWGLocalMemory(M);
   Changed |= dynamicWGLocalMemory(M);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

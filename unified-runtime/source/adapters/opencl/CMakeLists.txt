@@ -1,6 +1,5 @@
-# Copyright (C) 2023 Intel Corporation
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 set(OPENCL_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "OpenCL adapter directory")
@@ -27,6 +26,7 @@ add_ur_adapter(${TARGET_NAME} SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/enqueue.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/enqueue_native.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/event.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/graph.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/image.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/memory_export.cpp

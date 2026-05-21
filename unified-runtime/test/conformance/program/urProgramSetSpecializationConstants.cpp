@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -26,7 +25,8 @@ struct urProgramSetSpecializationConstantsTest : uur::urKernelExecutionTest {
   uint32_t default_spec_value = 1000; // Must match the one in the SYCL source
   ur_specialization_constant_info_t info = {0, sizeof(spec_value), &spec_value};
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urProgramSetSpecializationConstantsTest);
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
+    urProgramSetSpecializationConstantsTest);
 
 struct urProgramSetSpecializationConstantsNegativeTest
     : uur::urKernelExecutionTest {
@@ -48,7 +48,7 @@ struct urProgramSetSpecializationConstantsNegativeTest
   uint32_t default_spec_value = 1000; // Must match the one in the SYCL source
   ur_specialization_constant_info_t info = {0, sizeof(spec_value), &spec_value};
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
     urProgramSetSpecializationConstantsNegativeTest);
 
 struct urProgramSetMultipleSpecializationConstantsTest
@@ -68,7 +68,7 @@ struct urProgramSetMultipleSpecializationConstantsTest
     }
   }
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
     urProgramSetMultipleSpecializationConstantsTest);
 
 TEST_P(urProgramSetSpecializationConstantsTest, Success) {

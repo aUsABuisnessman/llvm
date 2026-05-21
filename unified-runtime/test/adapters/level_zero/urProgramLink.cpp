@@ -1,17 +1,16 @@
-// Copyright (C) 2024 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 // RUN: %maybe-v1 ./link-test
 // RUN: %maybe-v2 ./link-test
 
-#include "ur_api.h"
+#include "unified-runtime/ur_api.h"
 #include <uur/fixtures.h>
 
 using urLevelZeroProgramLinkTest = uur::urProgramTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urLevelZeroProgramLinkTest);
+UUR_DEVICE_TEST_SUITE_WITH_DEFAULT_QUEUE(urLevelZeroProgramLinkTest);
 
 TEST_P(urLevelZeroProgramLinkTest, InvalidLinkOptionsPrintedInLog) {
   ur_program_handle_t linked_program = nullptr;

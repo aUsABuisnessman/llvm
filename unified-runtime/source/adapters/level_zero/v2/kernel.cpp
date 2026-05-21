@@ -1,14 +1,13 @@
 //===--------- kernel.cpp - Level Zero Adapter ---------------------------===//
 //
-// Copyright (C) 2024 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-#include <ur_api.h>
+#include <unified-runtime/ur_api.h>
 
 #include "context.hpp"
 #include "kernel.hpp"
@@ -194,11 +193,18 @@ ur_kernel_handle_t_::getProperties(ur_device_handle_t hDevice) const {
 }
 
 ur_result_t ur_kernel_handle_t_::setArgValue(
-    uint32_t argIndex, size_t argSize,
+    ur_device_handle_t hDevice, uint32_t argIndex, size_t argSize,
     const ur_kernel_arg_value_properties_t * /*pProperties*/,
     const void *pArgValue) {
   if (argIndex > zeCommonProperties.numKernelArgs - 1) {
     return UR_RESULT_ERROR_INVALID_KERNEL_ARGUMENT_INDEX;
+  }
+
+  if (hDevice) { // Set argument only on the specified device
+    auto &deviceKernel = deviceKernels[deviceIndex(hDevice)].value();
+    UR_CALL(setArgValueOnZeKernel(deviceKernel.hKernel.get(), argIndex, argSize,
+                                  pArgValue));
+    return UR_RESULT_SUCCESS;
   }
 
   for (auto &singleDeviceKernel : deviceKernels) {
@@ -213,12 +219,13 @@ ur_result_t ur_kernel_handle_t_::setArgValue(
 }
 
 ur_result_t ur_kernel_handle_t_::setArgPointer(
-    uint32_t argIndex,
+    ur_device_handle_t hDevice, uint32_t argIndex,
     const ur_kernel_arg_pointer_properties_t * /*pProperties*/,
     const void *pArgValue) {
 
   // KernelSetArgValue is expecting a pointer to the argument
-  return setArgValue(argIndex, sizeof(const void *), nullptr, &pArgValue);
+  return setArgValue(hDevice, argIndex, sizeof(const void *), nullptr,
+                     &pArgValue);
 }
 
 ur_program_handle_t ur_kernel_handle_t_::getProgramHandle() const {
@@ -413,86 +420,6 @@ ur_result_t urKernelRelease(
     /// [in] handle for the Kernel to release
     ur_kernel_handle_t hKernel) try {
   return hKernel->release();
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-
-ur_result_t urKernelSetArgValue(
-    ur_kernel_handle_t hKernel, ///< [in] handle of the kernel object
-    uint32_t argIndex, ///< [in] argument index in range [0, num args - 1]
-    size_t argSize,    ///< [in] size of argument type
-    const ur_kernel_arg_value_properties_t
-        *pProperties, ///< [in][optional] argument properties
-    const void
-        *pArgValue ///< [in] argument value represented as matching arg type.
-    ) try {
-  TRACK_SCOPE_LATENCY("urKernelSetArgValue");
-
-  std::scoped_lock<ur_shared_mutex> guard(hKernel->Mutex);
-  return hKernel->setArgValue(argIndex, argSize, pProperties, pArgValue);
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-
-ur_result_t urKernelSetArgPointer(
-    ur_kernel_handle_t hKernel, ///< [in] handle of the kernel object
-    uint32_t argIndex, ///< [in] argument index in range [0, num args - 1]
-    const ur_kernel_arg_pointer_properties_t
-        * /*pProperties*/, ///< [in][optional] argument properties
-    const void
-        *pArgValue ///< [in] argument value represented as matching arg type.
-    ) try {
-  TRACK_SCOPE_LATENCY("urKernelSetArgPointer");
-
-  std::scoped_lock<ur_shared_mutex> guard(hKernel->Mutex);
-  // Store the raw pointer value and defer setting the
-  // argument until we know the device where kernel is being submitted.
-  return hKernel->addPendingPointerArgument(argIndex, pArgValue);
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-
-static ur_mem_buffer_t::device_access_mode_t
-memAccessFromMemFlags(const ur_mem_flags_t &Flags) {
-  switch (Flags) {
-  case UR_MEM_FLAG_READ_WRITE:
-    return ur_mem_buffer_t::device_access_mode_t::read_write;
-  case UR_MEM_FLAG_WRITE_ONLY:
-    return ur_mem_buffer_t::device_access_mode_t::write_only;
-  case UR_MEM_FLAG_READ_ONLY:
-    return ur_mem_buffer_t::device_access_mode_t::read_only;
-  default:
-    break;
-  }
-  return ur_mem_buffer_t::device_access_mode_t::read_write;
-}
-
-ur_result_t
-urKernelSetArgMemObj(ur_kernel_handle_t hKernel, uint32_t argIndex,
-                     const ur_kernel_arg_mem_obj_properties_t *pProperties,
-                     ur_mem_handle_t hArgValue) try {
-  TRACK_SCOPE_LATENCY("urKernelSetArgMemObj");
-
-  std::scoped_lock<ur_shared_mutex> guard(hKernel->Mutex);
-
-  UR_CALL(hKernel->addPendingMemoryAllocation(
-      {hArgValue,
-       memAccessFromMemFlags(pProperties ? pProperties->memoryAccess : 0),
-       argIndex}));
-
-  return UR_RESULT_SUCCESS;
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-
-ur_result_t urKernelSetArgLocal(
-    ur_kernel_handle_t hKernel, uint32_t argIndex, size_t argSize,
-    const ur_kernel_arg_local_properties_t * /*pProperties*/) try {
-  TRACK_SCOPE_LATENCY("urKernelSetArgLocal");
-
-  std::scoped_lock<ur_shared_mutex> guard(hKernel->Mutex);
-
-  return hKernel->setArgValue(argIndex, argSize, nullptr, nullptr);
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
@@ -710,6 +637,17 @@ ur_result_t urKernelGetSuggestedLocalWorkSize(
   return UR_RESULT_SUCCESS;
 }
 
+ur_result_t urKernelGetSuggestedLocalWorkSizeWithArgs(
+    ur_kernel_handle_t hKernel, ur_queue_handle_t hQueue, uint32_t workDim,
+    const size_t *pGlobalWorkOffset, const size_t *pGlobalWorkSize,
+    [[maybe_unused]] uint32_t numArgs,
+    [[maybe_unused]] const ur_exp_kernel_arg_properties_t *pArgs,
+    size_t *pSuggestedLocalWorkSize) {
+  return ur::level_zero::urKernelGetSuggestedLocalWorkSize(
+      hKernel, hQueue, workDim, pGlobalWorkOffset, pGlobalWorkSize,
+      pSuggestedLocalWorkSize);
+}
+
 ur_result_t urKernelSuggestMaxCooperativeGroupCount(
     ur_kernel_handle_t hKernel, ur_device_handle_t hDevice, uint32_t workDim,
     const size_t *pLocalWorkSize, size_t dynamicSharedMemorySize,
@@ -730,15 +668,4 @@ ur_result_t urKernelSuggestMaxCooperativeGroupCount(
   return UR_RESULT_SUCCESS;
 }
 
-ur_result_t urKernelSetArgSampler(
-    ur_kernel_handle_t hKernel, uint32_t argIndex,
-    const ur_kernel_arg_sampler_properties_t * /*pProperties*/,
-    ur_sampler_handle_t hArgValue) try {
-  TRACK_SCOPE_LATENCY("urKernelSetArgSampler");
-  std::scoped_lock<ur_shared_mutex> guard(hKernel->Mutex);
-  return hKernel->setArgValue(argIndex, sizeof(void *), nullptr,
-                              &hArgValue->ZeSampler);
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
 } // namespace ur::level_zero

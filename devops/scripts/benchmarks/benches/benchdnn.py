@@ -1,12 +1,11 @@
-# Copyright (C) 2025 Intel Corporation
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 
 from pathlib import Path
 
-from .base import Suite, Benchmark, TracingType
+from .base import Benchmark, Suite
 from options import options
 from utils.result import Result
 from utils.oneapi import get_oneapi
@@ -23,7 +22,8 @@ class OneDnnBench(Suite):
         return "https://github.com/uxlfoundation/oneDNN.git"
 
     def git_tag(self):
-        return "v3.8"
+        # 7 Nov, 2025
+        return "v3.10"
 
     def name(self):
         return "BenchDNN"
@@ -94,9 +94,6 @@ class OneDnnBench(Suite):
             timeout=60 * 20,
         )
 
-    def teardown(self):
-        pass
-
 
 class OneDnnBenchmark(Benchmark):
     def __init__(self, suite, bench_driver, bench_name, bench_args, syclgraph=True):
@@ -137,14 +134,9 @@ class OneDnnBenchmark(Benchmark):
     def run(
         self,
         env_vars,
-        run_trace: TracingType = TracingType.NONE,
+        flamegraph_enabled: bool = False,
         force_trace: bool = False,
     ) -> list[Result]:
-        # Determine extra trace options based on tracing type
-        if run_trace == TracingType.UNITRACE:
-            extra_trace_opt = ["--chrome-dnn-logging"]
-        else:
-            extra_trace_opt = None
 
         command = [
             str(self.benchmark_bin),
@@ -164,8 +156,7 @@ class OneDnnBenchmark(Benchmark):
             add_sycl=True,
             ld_library=ld_library,
             use_stdout=True,
-            run_trace=run_trace,
-            extra_trace_opt=extra_trace_opt,
+            flamegraph_enabled=flamegraph_enabled,
             force_trace=force_trace,
         )
         result_value = self._extract_time(output)
@@ -210,6 +201,3 @@ class OneDnnBenchmark(Benchmark):
         if values:
             return sum(values)
         return 0.0
-
-    def teardown(self):
-        pass

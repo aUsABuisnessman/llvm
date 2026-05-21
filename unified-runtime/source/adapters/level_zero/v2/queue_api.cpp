@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -53,20 +52,6 @@ ur_result_t urQueueFinish(ur_queue_handle_t hQueue) try {
 }
 ur_result_t urQueueFlush(ur_queue_handle_t hQueue) try {
   return hQueue->get().queueFlush();
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-ur_result_t urEnqueueKernelLaunch(
-    ur_queue_handle_t hQueue, ur_kernel_handle_t hKernel, uint32_t workDim,
-    const size_t *pGlobalWorkOffset, const size_t *pGlobalWorkSize,
-    const size_t *pLocalWorkSize, uint32_t numPropsInLaunchPropList,
-    const ur_kernel_launch_property_t *launchPropList,
-    uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
-    ur_event_handle_t *phEvent) try {
-  return hQueue->get().enqueueKernelLaunch(
-      hKernel, workDim, pGlobalWorkOffset, pGlobalWorkSize, pLocalWorkSize,
-      numPropsInLaunchPropList, launchPropList, numEventsInWaitList,
-      phEventWaitList, phEvent);
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
@@ -345,6 +330,21 @@ ur_result_t urEnqueueWriteHostPipe(ur_queue_handle_t hQueue,
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
+ur_result_t urEnqueueKernelLaunchWithArgsExp(
+    ur_queue_handle_t hQueue, ur_kernel_handle_t hKernel, uint32_t workDim,
+    const size_t *pGlobalWorkOffset, const size_t *pGlobalWorkSize,
+    const size_t *pLocalWorkSize, uint32_t numArgs,
+    const ur_exp_kernel_arg_properties_t *pArgs,
+    const ur_kernel_launch_ext_properties_t *launchPropList,
+    uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
+    ur_event_handle_t *phEvent) try {
+  return hQueue->get().enqueueKernelLaunchWithArgsExp(
+      hKernel, workDim, pGlobalWorkOffset, pGlobalWorkSize, pLocalWorkSize,
+      numArgs, pArgs, launchPropList, numEventsInWaitList, phEventWaitList,
+      phEvent);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
 ur_result_t urEnqueueUSMDeviceAllocExp(
     ur_queue_handle_t hQueue, ur_usm_pool_handle_t pPool, const size_t size,
     const ur_exp_async_usm_alloc_properties_t *pProperties,
@@ -425,6 +425,14 @@ ur_result_t urBindlessImagesSignalExternalSemaphoreExp(
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
+ur_result_t urEnqueueTimestampRecordingExp(
+    ur_queue_handle_t hQueue, bool blocking, uint32_t numEventsInWaitList,
+    const ur_event_handle_t *phEventWaitList, ur_event_handle_t *phEvent) try {
+  return hQueue->get().enqueueTimestampRecordingExp(
+      blocking, numEventsInWaitList, phEventWaitList, phEvent);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
 ur_result_t urEnqueueCommandBufferExp(
     ur_queue_handle_t hQueue, ur_exp_command_buffer_handle_t hCommandBuffer,
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
@@ -434,27 +442,14 @@ ur_result_t urEnqueueCommandBufferExp(
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
-ur_result_t urEnqueueTimestampRecordingExp(
-    ur_queue_handle_t hQueue, bool blocking, uint32_t numEventsInWaitList,
-    const ur_event_handle_t *phEventWaitList, ur_event_handle_t *phEvent) try {
-  return hQueue->get().enqueueTimestampRecordingExp(
-      blocking, numEventsInWaitList, phEventWaitList, phEvent);
-} catch (...) {
-  return exceptionToResult(std::current_exception());
-}
-ur_result_t urEnqueueKernelLaunchWithArgsExp(
-    ur_queue_handle_t hQueue, ur_kernel_handle_t hKernel, uint32_t workDim,
-    const size_t *pGlobalWorkOffset, const size_t *pGlobalWorkSize,
-    const size_t *pLocalWorkSize, uint32_t numArgs,
-    const ur_exp_kernel_arg_properties_t *pArgs,
-    uint32_t numPropsInLaunchPropList,
-    const ur_kernel_launch_property_t *launchPropList,
+ur_result_t urEnqueueHostTaskExp(
+    ur_queue_handle_t hQueue, ur_exp_host_task_function_t pfnHostTask,
+    void *data, const ur_exp_host_task_properties_t *pProperties,
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent) try {
-  return hQueue->get().enqueueKernelLaunchWithArgsExp(
-      hKernel, workDim, pGlobalWorkOffset, pGlobalWorkSize, pLocalWorkSize,
-      numArgs, pArgs, numPropsInLaunchPropList, launchPropList,
-      numEventsInWaitList, phEventWaitList, phEvent);
+  return hQueue->get().enqueueHostTaskExp(pfnHostTask, data, pProperties,
+                                          numEventsInWaitList, phEventWaitList,
+                                          phEvent);
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }
@@ -478,6 +473,45 @@ ur_result_t urEnqueueNativeCommandExp(
   return hQueue->get().enqueueNativeCommandExp(
       pfnNativeEnqueue, data, numMemsInMemList, phMemList, pProperties,
       numEventsInWaitList, phEventWaitList, phEvent);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urQueueBeginGraphCaptureExp(ur_queue_handle_t hQueue) try {
+  return hQueue->get().queueBeginGraphCapteExp();
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urQueueBeginCaptureIntoGraphExp(ur_queue_handle_t hQueue,
+                                            ur_exp_graph_handle_t hGraph) try {
+  return hQueue->get().queueBeginCapteIntoGraphExp(hGraph);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urQueueEndGraphCaptureExp(ur_queue_handle_t hQueue,
+                                      ur_exp_graph_handle_t *phGraph) try {
+  return hQueue->get().queueEndGraphCapteExp(phGraph);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urEnqueueGraphExp(ur_queue_handle_t hQueue,
+                              ur_exp_executable_graph_handle_t hGraph,
+                              uint32_t numEventsInWaitList,
+                              const ur_event_handle_t *phEventWaitList,
+                              ur_event_handle_t *phEvent) try {
+  return hQueue->get().enqueueGraphExp(hGraph, numEventsInWaitList,
+                                       phEventWaitList, phEvent);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urQueueIsGraphCaptureEnabledExp(ur_queue_handle_t hQueue,
+                                            bool *pResult) try {
+  return hQueue->get().queueIsGraphCapteEnabledExp(pResult);
+} catch (...) {
+  return exceptionToResult(std::current_exception());
+}
+ur_result_t urQueueGetGraphExp(ur_queue_handle_t hQueue,
+                               ur_exp_graph_handle_t *phGraph) try {
+  return hQueue->get().queueGetGraphExp(phGraph);
 } catch (...) {
   return exceptionToResult(std::current_exception());
 }

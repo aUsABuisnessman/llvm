@@ -9,10 +9,9 @@ from templates import helper as th
     X=x.upper()
 %>/*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -24,9 +23,10 @@ from templates import helper as th
 
 #pragma once
 
-#include <ur_api.h>
+#include <unified-runtime/ur_api.h>
+#include "queue_extensions.hpp"
 
-struct ur_queue_t_ {
+struct ur_queue_t_ : ur_queue_extensions {
     virtual ~ur_queue_t_();
 
     %for obj in th.get_queue_related_functions(specs, n, tags):

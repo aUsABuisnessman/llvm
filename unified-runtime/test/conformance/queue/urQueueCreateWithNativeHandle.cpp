@@ -1,12 +1,12 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include <uur/fixtures.h>
 
-using urQueueCreateWithNativeHandleTest = uur::urQueueTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urQueueCreateWithNativeHandleTest);
+using urQueueCreateWithNativeHandleTest = uur::urMultiQueueTypeTest;
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
+    urQueueCreateWithNativeHandleTest);
 
 TEST_P(urQueueCreateWithNativeHandleTest, Success) {
   ur_native_handle_t native_handle = 0;

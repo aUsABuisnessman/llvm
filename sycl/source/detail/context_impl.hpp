@@ -29,6 +29,18 @@ inline namespace _V1 {
 // Forward declaration
 class device;
 namespace detail {
+class context_impl;
+} // namespace detail
+namespace ext {
+namespace oneapi {
+namespace experimental {
+namespace detail {
+class graph_impl;
+} // namespace detail
+} // namespace experimental
+} // namespace oneapi
+} // namespace ext
+namespace detail {
 class context_impl : public std::enable_shared_from_this<context_impl> {
   struct private_tag {
     explicit private_tag() = default;
@@ -116,7 +128,7 @@ public:
   /// reference will be invalid if context_impl was destroyed.
   ///
   /// \return an instance of raw UR context handle.
-  ur_context_handle_t &getHandleRef();
+  ur_context_handle_t &getHandleRef() { return MContext; }
 
   /// Gets the underlying context object (if any) without reference count
   /// modification.
@@ -126,35 +138,19 @@ public:
   /// reference will be invalid if context_impl was destroyed.
   ///
   /// \return an instance of raw UR context handle.
-  const ur_context_handle_t &getHandleRef() const;
+  const ur_context_handle_t &getHandleRef() const { return MContext; }
 
   devices_range getDevices() const { return MDevices; }
 
-  using CachedLibProgramsT =
-      std::map<std::pair<DeviceLibExt, ur_device_handle_t>,
-               Managed<ur_program_handle_t>>;
-
-  /// In contrast to user programs, which are compiled from user code, library
-  /// programs come from the SYCL runtime. They are identified by the
-  /// corresponding extension:
-  ///
-  ///  cl_intel_devicelib_assert -> #<ur program with assert functions>
-  ///  cl_intel_devicelib_complex -> #<ur program with complex functions>
-  ///  etc.
-  ///
-  /// See `doc/design/DeviceLibExtensions.rst' for
-  /// more details.
-  ///
-  /// \returns an instance of sycl::detail::Locked which wraps a map with device
-  /// library programs and the corresponding lock for synchronized access.
-  Locked<CachedLibProgramsT> acquireCachedLibPrograms() {
-    return {MCachedLibPrograms, MCachedLibProgramsMutex};
+  KernelProgramCache &getKernelProgramCache() const {
+    return MKernelProgramCache;
   }
 
-  KernelProgramCache &getKernelProgramCache() const;
-
   /// Returns true if and only if context contains the given device.
-  bool hasDevice(const detail::device_impl &Device) const;
+  bool hasDevice(const detail::device_impl &Device) const {
+    return std::any_of(MDevices.begin(), MDevices.end(),
+                       [&](auto *D) { return D == &Device; });
+  }
 
   /// Returns true if and only if the device can be used within this context.
   /// For OpenCL this is currently equivalent to hasDevice, for other backends
@@ -181,8 +177,7 @@ public:
         return false;
       }
       CurrDevice = detail::getSyclObjImpl(
-                       CurrDevice->get_info<info::device::parent_device>())
-                       .get();
+          CurrDevice->get_info<info::device::parent_device>());
     }
 
     return true;
@@ -200,9 +195,6 @@ public:
   /// \return a native handle.
   ur_native_handle_t getNative() const;
 
-  // Returns true if buffer_location property is supported by devices
-  bool isBufferLocationSupported() const;
-
   /// Adds an associated device global to the tracked associates.
   void addAssociatedDeviceGlobal(const void *DeviceGlobalPtr);
 
@@ -213,6 +205,15 @@ public:
   void addDeviceGlobalInitializer(ur_program_handle_t Program,
                                   devices_range Devs,
                                   const RTDeviceBinaryImage *BinImage);
+
+  /// Removes device global initializers for a program.
+  void removeDeviceGlobalInitializer(ur_program_handle_t Program,
+                                     const RTDeviceBinaryImage *BinImage);
+
+  /// Returns the number of programs with device globals not yet initialized.
+  size_t getDeviceGlobalNotInitializedCnt() const {
+    return MDeviceGlobalNotInitializedCnt.load(std::memory_order_relaxed);
+  }
 
   /// Initializes device globals for a program on the associated queue.
   std::vector<ur_event_handle_t>
@@ -234,9 +235,6 @@ public:
   std::optional<ur_program_handle_t>
   getProgramForDeviceGlobal(const device &Device,
                             DeviceGlobalMapEntry *DeviceGlobalEntry);
-  /// Gets a program associated with a HostPipe Entry from the cache.
-  std::optional<ur_program_handle_t>
-  getProgramForHostPipe(const device &Device, HostPipeMapEntry *HostPipeEntry);
 
   /// Gets a program associated with Dev / Images pairs.
   std::optional<ur_program_handle_t>
@@ -254,6 +252,24 @@ public:
   get_default_memory_pool(const context &Context, const device &Device,
                           const usm::alloc &Kind);
 
+  /// Register a native UR graph handle with its SYCL graph implementation.
+  /// @param UrGraphHandle The native UR graph handle to register
+  /// @param Graph The SYCL graph implementation to associate with the handle
+  void registerNativeGraph(
+      ur_exp_graph_handle_t UrGraphHandle,
+      std::shared_ptr<sycl::ext::oneapi::experimental::detail::graph_impl>
+          Graph);
+
+  /// Lookup a SYCL graph implementation from a native UR graph handle.
+  /// @param UrGraphHandle The native UR graph handle to look up
+  /// @return Shared pointer to graph_impl if found, nullptr otherwise
+  std::shared_ptr<sycl::ext::oneapi::experimental::detail::graph_impl>
+  getNativeGraph(ur_exp_graph_handle_t UrGraphHandle) const;
+
+  /// Deregister a native UR graph handle.
+  /// @param UrGraphHandle The native UR graph handle to deregister
+  void deregisterNativeGraph(ur_exp_graph_handle_t UrGraphHandle);
+
 private:
   bool MOwnedByRuntime;
   async_handler MAsyncHandler;
@@ -261,8 +277,6 @@ private:
   ur_context_handle_t MContext;
   platform_impl &MPlatform;
   property_list MPropList;
-  CachedLibProgramsT MCachedLibPrograms;
-  std::mutex MCachedLibProgramsMutex;
   mutable KernelProgramCache MKernelProgramCache;
   mutable PropertySupport MSupportBufferLocationByDevices;
 
@@ -334,6 +348,16 @@ private:
            std::unique_ptr<std::byte[]>>
       MDeviceGlobalUnregisteredData;
   std::mutex MDeviceGlobalUnregisteredDataMutex;
+
+  // Native graph registry mapping UR handles to their originating SYCL graph
+  // object. Enables command_graph lookup in cases where direct backend
+  // submissions (e.g. L0) bypass SYCL and cause a queue to transition to
+  // recording without our knowledge.
+  std::unordered_map<
+      ur_exp_graph_handle_t,
+      std::weak_ptr<sycl::ext::oneapi::experimental::detail::graph_impl>>
+      MNativeGraphRegistry;
+  mutable std::mutex MNativeGraphRegistryMutex;
 
   void verifyProps(const property_list &Props) const;
 };

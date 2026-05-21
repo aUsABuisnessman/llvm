@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include <sycl/__spirv/spirv_ops.hpp>
+#include <sycl/__spirv/spirv_ops_runtime.hpp>
 #include <sycl/bit_cast.hpp>      // for sycl::bit_cast
 #include <sycl/builtins.hpp>      // for ceil, cos, exp, exp10, exp2
 #include <sycl/detail/memcpy.hpp> // sycl::detail::memcpy
@@ -475,6 +475,10 @@ BFLOAT16_MATH_FP32_WRAPPERS_VEC(sqrt)
 BFLOAT16_MATH_FP32_WRAPPERS(trunc)
 BFLOAT16_MATH_FP32_WRAPPERS_MARRAY(trunc)
 BFLOAT16_MATH_FP32_WRAPPERS_VEC(trunc)
+
+BFLOAT16_MATH_FP32_WRAPPERS(tanh)
+BFLOAT16_MATH_FP32_WRAPPERS_MARRAY(tanh)
+BFLOAT16_MATH_FP32_WRAPPERS_VEC(tanh)
 
 #undef BFLOAT16_MATH_FP32_WRAPPERS
 #undef BFLOAT16_MATH_FP32_WRAPPERS_MARRAY

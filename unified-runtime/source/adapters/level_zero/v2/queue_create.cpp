@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  * @file queue_api.cpp
@@ -12,8 +11,12 @@
 
 #include "logger/ur_logger.hpp"
 #include "queue_api.hpp"
+#include "queue_batched.hpp"
 #include "queue_handle.hpp"
 #include "queue_immediate_in_order.hpp"
+#include "unified-runtime/ur_api.h"
+
+static const bool ForceBatched = getenv_tobool("UR_L0_V2_FORCE_BATCHED");
 
 namespace v2 {
 
@@ -62,23 +65,57 @@ ur_result_t urQueueCreate(ur_context_handle_t hContext,
     return UR_RESULT_ERROR_INVALID_DEVICE;
   }
 
+  TRACK_SCOPE_LATENCY("queueCreate");
+
+  bool isImmediate = true;
+  bool isOutOfOrder = false;
+  bool isBatched = false;
+
   ur_queue_flags_t flags = 0;
   if (pProperties) {
     flags = pProperties->flags;
+
+    isImmediate = flags & UR_QUEUE_FLAG_SUBMISSION_IMMEDIATE;
+    isOutOfOrder = flags & UR_QUEUE_FLAG_OUT_OF_ORDER_EXEC_MODE_ENABLE;
+    isBatched = flags & UR_QUEUE_FLAG_SUBMISSION_BATCHED;
+  }
+
+  if (ForceBatched) {
+    flags |= UR_QUEUE_FLAG_SUBMISSION_BATCHED;
+    isBatched = true;
+
+    if (isImmediate) {
+      flags &= ~UR_QUEUE_FLAG_SUBMISSION_IMMEDIATE;
+      isImmediate = false;
+    }
+  } else {
+
+    if (pProperties && isImmediate && isBatched) {
+      return UR_RESULT_ERROR_INVALID_QUEUE_PROPERTIES;
+    }
   }
 
   auto zeIndex = v2::getZeIndex(pProperties);
 
-  if ((flags & UR_QUEUE_FLAG_OUT_OF_ORDER_EXEC_MODE_ENABLE) != 0) {
-    *phQueue =
-        ur_queue_handle_t_::create<v2::ur_queue_immediate_out_of_order_t>(
-            hContext, hDevice, v2::getZeOrdinal(hDevice),
-            v2::getZePriority(flags), zeIndex,
-            v2::eventFlagsFromQueueFlags(flags), flags);
-  } else {
-    *phQueue = ur_queue_handle_t_::create<v2::ur_queue_immediate_in_order_t>(
+  if (isBatched) {
+    // out of order not supported
+    *phQueue = ur_queue_handle_t_::create<v2::ur_queue_batched_t>(
         hContext, hDevice, v2::getZeOrdinal(hDevice), v2::getZePriority(flags),
         zeIndex, v2::eventFlagsFromQueueFlags(flags), flags);
+  } else {
+    if (isOutOfOrder) {
+      *phQueue =
+          ur_queue_handle_t_::create<v2::ur_queue_immediate_out_of_order_t>(
+              hContext, hDevice, v2::getZeOrdinal(hDevice),
+              v2::getZePriority(flags), zeIndex,
+              v2::eventFlagsFromQueueFlags(flags), flags);
+    } else {
+      // immediate
+      *phQueue = ur_queue_handle_t_::create<v2::ur_queue_immediate_in_order_t>(
+          hContext, hDevice, v2::getZeOrdinal(hDevice),
+          v2::getZePriority(flags), zeIndex,
+          v2::eventFlagsFromQueueFlags(flags), flags);
+    }
   }
 
   return UR_RESULT_SUCCESS;

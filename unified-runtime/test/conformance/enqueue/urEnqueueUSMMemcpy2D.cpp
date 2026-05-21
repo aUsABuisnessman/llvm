@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -13,12 +12,12 @@ using TestParametersMemcpy2D =
     std::tuple<uur::TestParameters2D, ur_usm_type_t, ur_usm_type_t>;
 
 struct urEnqueueUSMMemcpy2DTestWithParam
-    : uur::urQueueTestWithParam<TestParametersMemcpy2D> {
+    : uur::urMultiQueueTypeTestWithParam<TestParametersMemcpy2D> {
   void SetUp() override {
     UUR_KNOWN_FAILURE_ON(uur::NativeCPU{});
 
     UUR_RETURN_ON_FATAL_FAILURE(
-        uur::urQueueTestWithParam<TestParametersMemcpy2D>::SetUp());
+        uur::urMultiQueueTypeTestWithParam<TestParametersMemcpy2D>::SetUp());
 
     const auto [in2DParams, inSrcKind, inDstKind] = getParam();
     std::tie(src_pitch, dst_pitch, width, height, src_kind, dst_kind) =
@@ -67,7 +66,7 @@ struct urEnqueueUSMMemcpy2DTestWithParam
     if (pDst) {
       ASSERT_SUCCESS(urUSMFree(context, pDst));
     }
-    uur::urQueueTestWithParam<TestParametersMemcpy2D>::TearDown();
+    uur::urMultiQueueTypeTestWithParam<TestParametersMemcpy2D>::TearDown();
   }
 
   void verifyMemcpySucceeded() {
@@ -114,7 +113,7 @@ static std::vector<uur::TestParameters2D> test_sizes{
     /* Height == 1 && Pitch == width + 1 */
     {234, 233, 1}};
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueUSMMemcpy2DTestWithParam,
     ::testing::Combine(::testing::ValuesIn(test_sizes),
                        ::testing::Values(ur_usm_type_t::UR_USM_TYPE_DEVICE,
@@ -149,7 +148,7 @@ TEST_P(urEnqueueUSMMemcpy2DTestWithParam, SuccessNonBlocking) {
 }
 
 using urEnqueueUSMMemcpy2DNegativeTest = urEnqueueUSMMemcpy2DTestWithParam;
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueUSMMemcpy2DNegativeTest,
     ::testing::Values(TestParametersMemcpy2D{
         {1, 1, 1},

@@ -1,16 +1,16 @@
 //===--------- platform.hpp - Level Zero Adapter --------------------------===//
 //
-// Copyright (C) 2023 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 #pragma once
 
 #include "common.hpp"
-#include "ur_api.h"
+#include "external/driver_experimental/zex_graph.h"
+#include "unified-runtime/ur_api.h"
 #include "ze_api.h"
 #include "ze_ddi.h"
 #include "zes_api.h"
@@ -58,6 +58,8 @@ struct ur_platform_handle_t_ : ur::handle_base<ur::level_zero::ddi_getter>,
   std::string ZeDriverApiVersion;
   ze_api_version_t ZeApiVersion;
 
+  bool IsDriverVersionSkipListed{false};
+
   // Cache driver extensions
   std::unordered_map<std::string, uint32_t> zeDriverExtensionMap;
 
@@ -68,7 +70,10 @@ struct ur_platform_handle_t_ : ur::handle_base<ur::level_zero::ddi_getter>,
   bool zeDriverImmediateCommandListAppendFound{false};
   bool ZeDriverEuCountExtensionFound{false};
   bool ZeCopyOffloadExtensionSupported{false};
+  bool ZeCopyOffloadQueueFlagSupported{false};
+  bool ZeCopyOffloadListFlagSupported{false};
   bool ZeBindlessImagesExtensionSupported{false};
+  bool ZeExternalMemoryMappingExtensionSupported{false};
   bool ZeLUIDSupported{false};
 
   // Cache UR devices for reuse
@@ -92,11 +97,10 @@ struct ur_platform_handle_t_ : ur::handle_base<ur::level_zero::ddi_getter>,
                                      uint32_t VersionMinor,
                                      uint32_t VersionBuild);
 
-  // Keep track of all contexts in the platform. This is needed to manage
-  // a lifetime of memory allocations in each context when there are kernels
-  // with indirect access.
-  // TODO: should be deleted when memory isolation in the context is implemented
-  // in the driver.
+  // Keep track of all contexts in the platform. In v1 L0 this is needed to
+  // manage a lifetime of memory allocations in each context when there are
+  // kernels with indirect access. In v2 it is used during
+  // ext_oneapi_enable_peer_access and ext_oneapi_disable_peer_access calls.
   std::list<ur_context_handle_t> Contexts;
   ur_shared_mutex ContextsMutex;
 
@@ -166,9 +170,51 @@ struct ur_platform_handle_t_ : ur::handle_base<ur::level_zero::ddi_getter>,
   struct ZeCommandListAppendLaunchKernelWithArgumentsExtension {
     bool Supported = false;
     bool DriverSupportsCooperativeKernelLaunchWithArgs = false;
-    ze_result_t (*zeCommandListAppendLaunchKernelWithArgumentsFunctionPtr)(
-        ze_command_list_handle_t, ze_kernel_handle_t, const ze_group_count_t,
-        const ze_group_size_t, void **, const void *, ze_event_handle_t,
-        uint32_t, ze_event_handle_t *);
+    bool DisableZeLaunchKernelWithArgs = false;
   } ZeCommandListAppendLaunchKernelWithArgumentsExt;
+
+  struct ZeGraphExtension {
+    bool Supported = false;
+    ze_result_t (*zeGraphCreateExp)(ze_context_handle_t hContext,
+                                    ze_graph_handle_t *phGraph, void *pNext);
+    ze_result_t (*zeCommandListBeginGraphCaptureExp)(
+        ze_command_list_handle_t hCommandList, void *pNext);
+    ze_result_t (*zeCommandListBeginCaptureIntoGraphExp)(
+        ze_command_list_handle_t hCommandList, ze_graph_handle_t hGraph,
+        void *pNext);
+    ze_result_t (*zeCommandListEndGraphCaptureExp)(
+        ze_command_list_handle_t hCommandList, ze_graph_handle_t *phGraph,
+        void *pNext);
+    ze_result_t (*zeCommandListInstantiateGraphExp)(
+        ze_graph_handle_t hGraph,
+        ze_executable_graph_handle_t *phExecutableGraph, void *pNext);
+    ze_result_t (*zeCommandListAppendGraphExp)(
+        ze_command_list_handle_t hCommandList,
+        ze_executable_graph_handle_t hGraph, void *pNext,
+        ze_event_handle_t hSignalEvent, uint32_t numWaitEvents,
+        ze_event_handle_t *phWaitEvents);
+    ze_result_t (*zeGraphDestroyExp)(ze_graph_handle_t hGraph);
+    ze_result_t (*zeExecutableGraphDestroyExp)(
+        ze_executable_graph_handle_t hGraph);
+    ze_result_t (*zeCommandListIsGraphCaptureEnabledExp)(
+        ze_command_list_handle_t hCommandList);
+    ze_result_t (*zeCommandListGetGraphExp)(
+        ze_command_list_handle_t hCommandList, ze_graph_handle_t *phGraph);
+    ze_result_t (*zeGraphIsEmptyExp)(ze_graph_handle_t hGraph);
+    ze_result_t (*zeGraphDumpContentsExp)(ze_graph_handle_t hGraph,
+                                          const char *filePath, void *pNext);
+  } ZeGraphExt;
+
+  struct ZeHostTaskExtension {
+    bool Supported = false;
+    ze_result_t (*zeCommandListAppendHostFunction)(
+        ze_command_list_handle_t hCommandList, void *pHostFunction,
+        void *pUserData, void *pNext, ze_event_handle_t hSignalEvent,
+        uint32_t numWaitEvents, ze_event_handle_t *phWaitEvents);
+  } ZeHostTaskExt;
+
+  // Flag to indicate whether zeDeviceSynchronize is supported.
+  // Some platforms may not support this API due to frozen driver, eg. gen12 on
+  // Windows. For details, see https://github.com/intel/llvm/issues/20927.
+  bool ZeDeviceSynchronizeSupported{false};
 };

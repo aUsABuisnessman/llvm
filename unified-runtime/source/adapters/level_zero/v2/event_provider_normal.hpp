@@ -1,9 +1,8 @@
 //===--------- event_provider_normal.hpp - Level Zero Adapter -------------===//
 //
-// Copyright (C) 2024 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
@@ -14,23 +13,19 @@
 #include <mutex>
 #include <stack>
 
+#include <unified-runtime/ur_api.h>
 #include <unordered_map>
 #include <ur/ur.hpp>
-#include <ur_api.h>
 #include <ze_api.h>
 
 #include "common.hpp"
 #include "event.hpp"
+#include "event_provider.hpp"
 
 #include "../device.hpp"
 #include "../ur_interface_loader.hpp"
 
 namespace v2 {
-
-enum queue_type {
-  QUEUE_REGULAR,
-  QUEUE_IMMEDIATE,
-};
 
 class provider_pool {
 public:

@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -35,7 +34,8 @@ struct urProgramCreateWithBinaryTest : uur::urProgramTest {
   std::vector<uint8_t> binary;
   ur_program_handle_t binary_program = nullptr;
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urProgramCreateWithBinaryTest);
+
+UUR_DEVICE_TEST_SUITE_WITH_DEFAULT_QUEUE(urProgramCreateWithBinaryTest);
 
 TEST_P(urProgramCreateWithBinaryTest, Success) {
   auto size = binary.size();

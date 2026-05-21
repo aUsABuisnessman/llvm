@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // RUN: %{build} -o %t.out
 // RUN: %if hip %{ env SYCL_JIT_AMDGCN_PTX_TARGET_CPU=%{amd_arch} %} %{l0_leak_check} %{run} %t.out
 
@@ -24,7 +26,7 @@ int main() {
 #include "a.hpp"
 #include <cstring>
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 namespace syclext = sycl::ext::oneapi;
 namespace syclexp = sycl::ext::oneapi::experimental;
 

@@ -1,6 +1,5 @@
-# Copyright (C) 2022-2025 Intel Corporation
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 if (UR_BUILD_ADAPTER_L0 OR UR_BUILD_ADAPTER_L0_V2)
@@ -72,7 +71,7 @@ endif()
 set(UR_USE_EXTERNAL_UMF ON CACHE BOOL "Use a pre-built UMF if available")
 
 if(UR_USE_EXTERNAL_UMF)
-  find_package(umf 1.0.0 QUIET)
+  find_package(umf 1.1.0 QUIET)
 endif()
 if(umf_FOUND)
   message(STATUS "Using preinstalled UMF at ${umf_DIR}, ignoring UMF build related options")
@@ -81,11 +80,12 @@ if(umf_FOUND)
 else()
   set(UMF_REPO "https://github.com/oneapi-src/unified-memory-framework.git")
 
-  # commit 1209db2c5702b5de773ffc117b03e62f57f9554f
-  # Author: Łukasz Ślusarczyk <lukasz.slusarczyk@intel.com>
-  # Date:   Mon Aug 25 13:35:07 2025 +0200
-  # Add resident device change call
-  set(UMF_TAG v1.1.0-dev3)
+  # commit 5a986843a2469d3e04771c1f27314ba6cc3c62f6
+  # Author: Łukasz Stolarczuk <lukasz.stolarczuk@intel.com>
+  # Date:   Wed May 13 15:04:31 2026 +0200
+  # Merge pull request #1573 from ldorau/L0_Fix_incorrect_log_messages_in_provider_level_zero.c
+  # [L0] Fix incorrect log messages in provider_level_zero.c
+  set(UMF_TAG v1.2.0-dev1)
 
   if(NOT FETCHCONTENT_SOURCE_DIR_UNIFIED-MEMORY-FRAMEWORK)
     message(STATUS "Will fetch Unified Memory Framework from ${UMF_REPO}")

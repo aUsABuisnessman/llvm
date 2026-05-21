@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // RUN: %{build} -o %t.out
 // RUN: %if hip %{ env SYCL_JIT_AMDGCN_PTX_TARGET_CPU=%{amd_arch} %} %{run} %t.out
 
@@ -36,7 +38,7 @@ int main(int argc, char **argv) {
   Test(R"""(
 #define SYCL_SIMPLE_SWIZZLES
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 #include <sycl/vector.hpp>
 
 namespace syclext = sycl::ext::oneapi;

@@ -10,10 +10,12 @@
 #include <detail/event_impl.hpp>
 #include <detail/memory_manager.hpp>
 #include <detail/queue_impl.hpp>
+#include <detail/scheduler/commands.hpp>
 #include <sycl/context.hpp>
 #include <sycl/detail/common.hpp>
 #include <sycl/detail/ur.hpp>
 #include <sycl/device.hpp>
+#include <sycl/ext/oneapi/work_group_scratch_memory.hpp>
 
 #include <cstring>
 #include <utility>
@@ -76,54 +78,12 @@ template <> device queue_impl::get_info<info::queue::device>() const {
   return get_device();
 }
 
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::platform::version::return_type
-queue_impl::get_backend_info<info::platform::version>() const {
-  if (getContextImpl().getBackend() != backend::opencl) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::platform::version info descriptor can "
-                          "only be queried with an OpenCL backend");
-  }
-  return get_device().get_platform().get_info<info::platform::version>();
-}
-#endif
-
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::device::version::return_type
-queue_impl::get_backend_info<info::device::version>() const {
-  if (getContextImpl().getBackend() != backend::opencl) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::device::version info descriptor can only "
-                          "be queried with an OpenCL backend");
-  }
-  return get_device().get_info<info::device::version>();
-}
-#endif
-
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::device::backend_version::return_type
-queue_impl::get_backend_info<info::device::backend_version>() const {
-  if (getContextImpl().getBackend() != backend::ext_oneapi_level_zero) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::device::backend_version info descriptor "
-                          "can only be queried with a Level Zero backend");
-  }
-  return "";
-  // Currently The Level Zero backend does not define the value of this
-  // information descriptor and implementations are encouraged to return the
-  // empty string as per specification.
-}
-#endif
-
-static event
+static EventImplPtr
 prepareSYCLEventAssociatedWithQueue(detail::queue_impl &QueueImpl) {
   auto EventImpl = detail::event_impl::create_device_event(QueueImpl);
   EventImpl->setContextImpl(QueueImpl.getContextImpl());
   EventImpl->setStateIncomplete();
-  return detail::createSyclObjFromImpl<event>(EventImpl);
+  return EventImpl;
 }
 
 const std::vector<event> &
@@ -145,13 +105,14 @@ queue_impl::getExtendDependencyList(const std::vector<event> &DepEvents,
   if (ExternalEvent)
     MutableVec.push_back(*ExternalEvent);
   if (ExtraEvent)
-    MutableVec.push_back(detail::createSyclObjFromImpl<event>(ExtraEvent));
+    MutableVec.push_back(
+        detail::createSyclObjFromImpl<event>(std::move(ExtraEvent)));
   return MutableVec;
 }
 
-event queue_impl::memset(void *Ptr, int Value, size_t Count,
-                         const std::vector<event> &DepEvents,
-                         bool CallerNeedsEvent) {
+EventImplPtr queue_impl::memset(void *Ptr, int Value, size_t Count,
+                                const std::vector<event> &DepEvents,
+                                bool CallerNeedsEvent) {
 #if XPTI_ENABLE_INSTRUMENTATION
   // We need a code pointer value and we use the object ptr; if code location
   // information is available, we will have function name and source file
@@ -175,12 +136,17 @@ event queue_impl::memset(void *Ptr, int Value, size_t Count,
   // This information is necessary for memset, so we will not guard it by debug
   // stream check.
   TP.addMetadata([&](auto TEvent) {
-    xpti::addMetadata(TEvent, "sycl_device",
-                      reinterpret_cast<size_t>(MDevice.getHandleRef()));
-    xpti::addMetadata(TEvent, "memory_ptr", reinterpret_cast<size_t>(Ptr));
-    xpti::addMetadata(TEvent, "value_set", Value);
     xpti::addMetadata(TEvent, "memory_size", Count);
-    xpti::addMetadata(TEvent, "queue_id", MQueueID);
+    if (detail::GSYCLStreamDetailLevel >=
+            xpti::stream_detail_level_t::XPTI_STREAM_DETAIL_LEVEL_NORMAL ||
+        isDebugStream(detail::getActiveXPTIStreamID())) {
+      xpti::addMetadata(TEvent, "sycl_device",
+                        reinterpret_cast<size_t>(MDevice.getHandleRef()));
+      xpti::addMetadata(TEvent, "memory_ptr", reinterpret_cast<size_t>(Ptr));
+      xpti::addMetadata(TEvent, "value_set", Value);
+
+      xpti::addMetadata(TEvent, "queue_id", MQueueID);
+    }
   });
 
   // Before we notifiy the subscribers, we broadcast the 'queue_id', which was a
@@ -212,9 +178,10 @@ void report(const code_location &CodeLoc) {
   std::cout << '\n';
 }
 
-event queue_impl::memcpy(void *Dest, const void *Src, size_t Count,
-                         const std::vector<event> &DepEvents,
-                         bool CallerNeedsEvent, const code_location &CodeLoc) {
+EventImplPtr queue_impl::memcpy(void *Dest, const void *Src, size_t Count,
+                                const std::vector<event> &DepEvents,
+                                bool CallerNeedsEvent,
+                                const code_location &CodeLoc) {
 #if XPTI_ENABLE_INSTRUMENTATION
   // We need a code pointer value and we duse the object ptr; If code location
   // is available, we use the source file information along with the object
@@ -228,13 +195,18 @@ event queue_impl::memcpy(void *Dest, const void *Src, size_t Count,
   const char *UserData = "memory_transfer_node::memcpy";
   // We will include this metadata information as it is required for memcpy.
   TP.addMetadata([&](auto TEvent) {
-    xpti::addMetadata(TEvent, "sycl_device",
-                      reinterpret_cast<size_t>(MDevice.getHandleRef()));
-    xpti::addMetadata(TEvent, "src_memory_ptr", reinterpret_cast<size_t>(Src));
-    xpti::addMetadata(TEvent, "dest_memory_ptr",
-                      reinterpret_cast<size_t>(Dest));
     xpti::addMetadata(TEvent, "memory_size", Count);
-    xpti::addMetadata(TEvent, "queue_id", MQueueID);
+    if (detail::GSYCLStreamDetailLevel >=
+            xpti::stream_detail_level_t::XPTI_STREAM_DETAIL_LEVEL_NORMAL ||
+        isDebugStream(detail::getActiveXPTIStreamID())) {
+      xpti::addMetadata(TEvent, "sycl_device",
+                        reinterpret_cast<size_t>(MDevice.getHandleRef()));
+      xpti::addMetadata(TEvent, "src_memory_ptr",
+                        reinterpret_cast<size_t>(Src));
+      xpti::addMetadata(TEvent, "dest_memory_ptr",
+                        reinterpret_cast<size_t>(Dest));
+      xpti::addMetadata(TEvent, "queue_id", MQueueID);
+    }
   });
   // Before we notify the subscribers, we stash the 'queue_id', which was a
   // metadata entry to TLS for use by callback handlers
@@ -256,21 +228,20 @@ event queue_impl::memcpy(void *Dest, const void *Src, size_t Count,
       MemoryManager::copy_usm, Src, *this, Count, Dest);
 }
 
-event queue_impl::mem_advise(const void *Ptr, size_t Length,
-                             ur_usm_advice_flags_t Advice,
-                             const std::vector<event> &DepEvents,
-                             bool CallerNeedsEvent) {
+EventImplPtr queue_impl::mem_advise(const void *Ptr, size_t Length,
+                                    ur_usm_advice_flags_t Advice,
+                                    const std::vector<event> &DepEvents,
+                                    bool CallerNeedsEvent) {
   return submitMemOpHelper(
       DepEvents, CallerNeedsEvent,
       [&](handler &CGH) { CGH.mem_advise(Ptr, Length, Advice); },
       MemoryManager::advise_usm, Ptr, *this, Length, Advice);
 }
 
-event queue_impl::memcpyToDeviceGlobal(void *DeviceGlobalPtr, const void *Src,
-                                       bool IsDeviceImageScope, size_t NumBytes,
-                                       size_t Offset,
-                                       const std::vector<event> &DepEvents,
-                                       bool CallerNeedsEvent) {
+EventImplPtr queue_impl::memcpyToDeviceGlobal(
+    void *DeviceGlobalPtr, const void *Src, bool IsDeviceImageScope,
+    size_t NumBytes, size_t Offset, const std::vector<event> &DepEvents,
+    bool CallerNeedsEvent) {
   return submitMemOpHelper(
       DepEvents, CallerNeedsEvent,
       [&](handler &CGH) {
@@ -281,12 +252,10 @@ event queue_impl::memcpyToDeviceGlobal(void *DeviceGlobalPtr, const void *Src,
       *this, NumBytes, Offset, Src);
 }
 
-event queue_impl::memcpyFromDeviceGlobal(void *Dest,
-                                         const void *DeviceGlobalPtr,
-                                         bool IsDeviceImageScope,
-                                         size_t NumBytes, size_t Offset,
-                                         const std::vector<event> &DepEvents,
-                                         bool CallerNeedsEvent) {
+EventImplPtr queue_impl::memcpyFromDeviceGlobal(
+    void *Dest, const void *DeviceGlobalPtr, bool IsDeviceImageScope,
+    size_t NumBytes, size_t Offset, const std::vector<event> &DepEvents,
+    bool CallerNeedsEvent) {
   return submitMemOpHelper(
       DepEvents, CallerNeedsEvent,
       [&](handler &CGH) {
@@ -326,17 +295,23 @@ void queue_impl::addEvent(const detail::EventImplPtr &EventImpl) {
   }
 }
 
+void queue_impl::addEventUnlocked(const detail::EventImplPtr &EventImpl) {
+  if (!EventImpl)
+    return;
+  Command *Cmd = EventImpl->getCommand();
+  if (Cmd != nullptr && EventImpl->getHandle() == nullptr) {
+    std::weak_ptr<event_impl> EventWeakPtr{EventImpl};
+    MEventsWeak.push_back(std::move(EventWeakPtr));
+  }
+}
+
 detail::EventImplPtr
 queue_impl::submit_impl(const detail::type_erased_cgfo_ty &CGF,
                         bool CallerNeedsEvent, const detail::code_location &Loc,
                         bool IsTopCodeLoc,
-                        const v1::SubmissionInfo &SubmitInfo) {
-#ifdef __INTEL_PREVIEW_BREAKING_CHANGES
+                        const detail::SubmissionInfo &SubmitInfo) {
   detail::handler_impl HandlerImplVal(*this, CallerNeedsEvent);
   handler Handler(HandlerImplVal);
-#else
-  handler Handler(shared_from_this(), CallerNeedsEvent);
-#endif
 
 #ifdef XPTI_ENABLE_INSTRUMENTATION
   if (xptiTraceEnabled()) {
@@ -418,7 +393,8 @@ queue_impl::submit_impl(const detail::type_erased_cgfo_ty &CGF,
     }
   }
 
-  return EventImpl;
+  // TODO Avoid event creation in the first place if it's not needed
+  return CallerNeedsEvent ? EventImpl : nullptr;
 }
 
 EventImplPtr queue_impl::submit_kernel_scheduler_bypass(
@@ -434,14 +410,7 @@ EventImplPtr queue_impl::submit_kernel_scheduler_bypass(
     RawEvents = detail::Command::getUrEvents(DepEvents, this, false);
   }
 
-  bool DiscardEvent = !EventNeeded && supportsDiscardingPiEvents();
-  if (DiscardEvent) {
-    // Kernel only uses assert if it's non interop one
-    bool KernelUsesAssert =
-        !(KernelImplPtr && KernelImplPtr->isInterop()) && KData.usesAssert();
-    DiscardEvent = !KernelUsesAssert;
-  }
-
+  bool DiscardEvent = !EventNeeded && isInOrder();
   std::shared_ptr<detail::event_impl> ResultEvent =
       DiscardEvent ? nullptr : detail::event_impl::create_device_event(*this);
 
@@ -508,6 +477,184 @@ EventImplPtr queue_impl::submit_kernel_scheduler_bypass(
   }
 
   return ResultEvent;
+}
+
+EventImplPtr queue_impl::submit_barrier_scheduler_bypass(
+    std::vector<detail::EventImplPtr> &BarrierDepEvents,
+    std::vector<detail::EventImplPtr> &DepEvents, detail::CGType BarrierType) {
+
+  ur_event_handle_t UREvent = nullptr;
+  std::vector<ur_event_handle_t> RawBarrierDepEvents;
+  std::vector<ur_event_handle_t> RawDepEvents;
+
+  if (BarrierDepEvents.size() > 0) {
+    RawBarrierDepEvents =
+        detail::Command::getUrEvents(BarrierDepEvents, this, false);
+  }
+
+  if (DepEvents.size() > 0) {
+    RawDepEvents = detail::Command::getUrEvents(DepEvents, this, false);
+  }
+
+  auto ResEvent = detail::event_impl::create_device_event(*this);
+  ResEvent->setWorkerQueue(weak_from_this());
+  ResEvent->setSubmissionTime();
+  ResEvent->setEnqueued();
+  ResEvent->setStateIncomplete();
+
+  // We can skip the barrier UR call only if both the barrier wait list
+  // and the list of barrier command dependencies are empty (after filtering
+  // the UR events).
+  // TODO Currently the scheduler path will only check the barrier wait
+  // list.
+  if (BarrierType == CGType::BarrierWaitlist && RawBarrierDepEvents.empty() &&
+      RawDepEvents.empty()) {
+    ResEvent->setComplete();
+    return ResEvent;
+  }
+
+  if (BarrierType == CGType::Barrier) {
+    if (RawDepEvents.size()) {
+      getAdapter().call<UrApiKind::urEnqueueEventsWait>(
+          getHandleRef(), RawDepEvents.size(), &RawDepEvents[0], nullptr);
+    }
+
+    getAdapter().call<UrApiKind::urEnqueueEventsWaitWithBarrierExt>(
+        getHandleRef(), nullptr, 0, nullptr, &UREvent);
+  } else {
+
+    RawDepEvents.insert(RawDepEvents.end(), RawBarrierDepEvents.begin(),
+                        RawBarrierDepEvents.end());
+
+    getAdapter().call<UrApiKind::urEnqueueEventsWaitWithBarrierExt>(
+        getHandleRef(), nullptr, RawDepEvents.size(), RawDepEvents.data(),
+        &UREvent);
+  }
+
+  ResEvent->setHandle(UREvent);
+
+  // connect returned event with dependent events
+  if (!isInOrder()) {
+
+    if (BarrierType == CGType::BarrierWaitlist) {
+      DepEvents.insert(DepEvents.end(), BarrierDepEvents.begin(),
+                       BarrierDepEvents.end());
+    }
+
+    // DepEvents is not used anymore, so can move.
+    ResEvent->getPreparedDepsEvents() = std::move(DepEvents);
+    // ResultEvent is local for current thread, no need to lock.
+    ResEvent->cleanDepEventsThroughOneLevelUnlocked();
+  }
+
+  return ResEvent;
+}
+
+EventImplPtr
+queue_impl::submit_barrier_direct_impl(sycl::span<const event> DepEvents,
+                                       detail::CGType BarrierType,
+                                       const detail::code_location &CodeLoc) {
+  auto SubmitBarrierFunc = [&](detail::CG::StorageInitHelper &&CGData)
+      -> std::pair<EventImplPtr, bool> {
+    std::vector<detail::EventImplPtr> DepEventImpls;
+
+    if (!DepEvents.empty()) {
+      for (const event &Event : DepEvents) {
+        const auto &EventPtr = detail::getSyclObjImpl(Event);
+
+        if (EventPtr->isHost()) {
+          detail::registerEventDependency</*LockQueue*/ false>(
+              EventPtr, CGData.MEvents, this, getContextImpl(), getDeviceImpl(),
+              getCommandGraph().get(), CGType::BarrierWaitlist);
+        }
+
+        DepEventImpls.emplace_back(EventPtr);
+      }
+    }
+
+    bool SchedulerBypass = !getCommandGraph();
+
+    if (DepEventImpls.size() > 0) {
+      SchedulerBypass &= detail::Scheduler::areEventsSafeForSchedulerBypass(
+          DepEventImpls, getContextImpl());
+    }
+
+    SchedulerBypass &= detail::Scheduler::areEventsSafeForSchedulerBypass(
+        CGData.MEvents, getContextImpl());
+
+    if (SchedulerBypass) {
+      return {submit_barrier_scheduler_bypass(DepEventImpls, CGData.MEvents,
+                                              BarrierType),
+              /*SchedulerBypass*/ true};
+    }
+
+    std::unique_ptr<detail::CG> CommandGroup;
+
+    if (auto GraphImpl = getCommandGraph(); GraphImpl) {
+      CGData.MEvents.insert(std::end(CGData.MEvents), std::begin(DepEventImpls),
+                            std::end(DepEventImpls));
+      CommandGroup.reset(
+          new detail::CG(detail::CGType::Barrier, std::move(CGData), CodeLoc));
+
+      return {this->submit_command_to_graph(
+                  *getCommandGraph(), std::move(CommandGroup), CGType::Barrier),
+              false};
+    }
+
+    CommandGroup.reset(
+        new detail::CGBarrier(std::move(DepEventImpls),
+                              ext::oneapi::experimental::event_mode_enum::none,
+                              std::move(CGData), BarrierType, CodeLoc));
+
+    return {detail::Scheduler::getInstance().addCG(std::move(CommandGroup),
+                                                   *this, true),
+            /*SchedulerBypass*/ false};
+  };
+
+  return submit_direct(true, {}, SubmitBarrierFunc, BarrierType,
+                       /*InsertBarrierForInOrderCommand*/ false);
+}
+
+bool queue_impl::isNativeRecording() const {
+  bool IsGraphCaptureEnabled = false;
+  ur_result_t Result =
+      getAdapter().call_nocheck<UrApiKind::urQueueIsGraphCaptureEnabledExp>(
+          MQueue, &IsGraphCaptureEnabled);
+  return Result == UR_RESULT_SUCCESS && IsGraphCaptureEnabled;
+}
+
+ext::oneapi::experimental::queue_state
+queue_impl::ext_oneapi_get_state_impl() const {
+  // A graph may either be recording at the SYCL level or recording at a lower
+  // level API (e.g. UR)
+  if (hasCommandGraph() || isNativeRecording()) {
+    return ext::oneapi::experimental::queue_state::recording;
+  }
+  return ext::oneapi::experimental::queue_state::executing;
+}
+
+std::shared_ptr<ext::oneapi::experimental::detail::graph_impl>
+queue_impl::ext_oneapi_get_graph_impl() const {
+  auto Graph = getCommandGraph();
+  if (!Graph && isNativeRecording()) {
+    ur_exp_graph_handle_t UrGraphHandle = nullptr;
+    ur_result_t Result =
+        getAdapter().call_nocheck<UrApiKind::urQueueGetGraphExp>(
+            MQueue, &UrGraphHandle);
+
+    if (Result == UR_RESULT_SUCCESS) {
+      Graph = getContextImpl().getNativeGraph(UrGraphHandle);
+    } else if (Result != UR_RESULT_ERROR_INVALID_OPERATION) {
+      throw sycl::exception(make_error_code(errc::runtime),
+                            "Failed to query native UR graph from queue.");
+    }
+  }
+  if (!Graph) {
+    throw sycl::exception(
+        make_error_code(errc::invalid),
+        "ext_oneapi_get_graph() can only be called on recording queues.");
+  }
+  return Graph;
 }
 
 EventImplPtr queue_impl::submit_command_to_graph(
@@ -581,16 +728,31 @@ EventImplPtr queue_impl::submit_kernel_direct_impl(
   KData.validateAndSetKernelLaunchProperties(Props, hasCommandGraph(),
                                              getDeviceImpl());
 
-  auto SubmitKernelFunc = [&](detail::CG::StorageInitHelper &CGData,
-                              bool SchedulerBypass) -> EventImplPtr {
+  if (!Props.get<sycl::ext::oneapi::experimental::work_group_scratch_size>()
+           ->MProperty &&
+      DeviceKernelInfo->getWorkGroupDynamicLocalMem())
+    throw sycl::exception(
+        sycl::make_error_code(sycl::errc::memory_allocation),
+        "Kernel allocates work group scratch memory but an allocation size "
+        "has not been specified through the work_group_scratch_size property!");
+
+  auto SubmitKernelFunc = [&](detail::CG::StorageInitHelper &&CGData)
+      -> std::pair<EventImplPtr, bool> {
+    bool SchedulerBypass =
+        (CGData.MEvents.size() > 0
+             ? detail::Scheduler::areEventsSafeForSchedulerBypass(
+                   CGData.MEvents, getContextImpl())
+             : true) &&
+        !hasCommandGraph();
     if (SchedulerBypass) {
       // No need to copy/move the kernel function, so we set
       // the function pointer to the original function
       KData.setKernelFunc(HostKernel.getPtr());
 
-      return submit_kernel_scheduler_bypass(KData, CGData.MEvents,
-                                            CallerNeedsEvent, nullptr, nullptr,
-                                            CodeLoc, IsTopCodeLoc);
+      return {submit_kernel_scheduler_bypass(KData, CGData.MEvents,
+                                             CallerNeedsEvent, nullptr, nullptr,
+                                             CodeLoc, IsTopCodeLoc),
+              /*SchedulerBypass*/ true};
     }
     std::unique_ptr<detail::CG> CommandGroup;
     std::vector<std::shared_ptr<detail::stream_impl>> StreamStorage;
@@ -618,27 +780,67 @@ EventImplPtr queue_impl::submit_kernel_direct_impl(
     CommandGroup->MIsTopCodeLoc = IsTopCodeLoc;
 
     if (auto GraphImpl = getCommandGraph(); GraphImpl) {
-      return submit_command_to_graph(*GraphImpl, std::move(CommandGroup),
-                                     detail::CGType::Kernel);
+      return {submit_command_to_graph(*GraphImpl, std::move(CommandGroup),
+                                      detail::CGType::Kernel),
+              /*SchedulerBypass*/ false};
     }
 
-    return detail::Scheduler::getInstance().addCG(std::move(CommandGroup),
-                                                  *this, true);
+    return {detail::Scheduler::getInstance().addCG(std::move(CommandGroup),
+                                                   *this, true),
+            /*SchedulerBypass*/ false};
   };
 
-  return submit_direct(CallerNeedsEvent, DepEvents, SubmitKernelFunc);
+  return submit_direct(CallerNeedsEvent, DepEvents, SubmitKernelFunc,
+                       detail::CGType::Kernel,
+                       /*InsertBarrierForInOrderCommand*/ false);
+}
+
+EventImplPtr queue_impl::submit_graph_direct_impl(
+    std::shared_ptr<ext::oneapi::experimental::detail::exec_graph_impl>
+        ExecGraph,
+    bool CallerNeedsEvent, sycl::span<const event> DepEvents,
+    [[maybe_unused]] const detail::code_location &CodeLoc, bool IsTopCodeLoc) {
+  bool EventNeeded =
+      CallerNeedsEvent || ExecGraph->containsHostTask() || !isInOrder();
+  auto SubmitGraphFunc = [&](detail::CG::StorageInitHelper &&CGData)
+      -> std::pair<EventImplPtr, bool> {
+    if (auto ParentGraph = getCommandGraph(); ParentGraph) {
+      std::unique_ptr<detail::CG> CommandGroup;
+      {
+        ext::oneapi::experimental::detail::graph_impl::ReadLock ExecLock(
+            ExecGraph->MMutex);
+        CGData.MRequirements = ExecGraph->getRequirements();
+      }
+      // Here we are using the CommandGroup without passing a CommandBuffer to
+      // pass the exec_graph_impl and event dependencies. Since this subgraph
+      // CG will not be executed this is fine.
+      CommandGroup.reset(new sycl::detail::CGExecCommandBuffer(
+          nullptr, ExecGraph, std::move(CGData)));
+      CommandGroup->MIsTopCodeLoc = IsTopCodeLoc;
+      return {submit_command_to_graph(*ParentGraph, std::move(CommandGroup),
+                                      detail::CGType::ExecCommandBuffer),
+              /*SchedulerBypass*/ false};
+    } else {
+      return ExecGraph->enqueue(*this, std::move(CGData), EventNeeded);
+    }
+  };
+  // If the graph contains a host task, we may need to insert a barrier prior
+  // to submission to ensure correct ordering with in-order queues.
+  return submit_direct(CallerNeedsEvent, DepEvents, SubmitGraphFunc,
+                       detail::CGType::ExecCommandBuffer,
+                       ExecGraph->containsHostTask());
 }
 
 template <typename SubmitCommandFuncType>
-detail::EventImplPtr
-queue_impl::submit_direct(bool CallerNeedsEvent,
-                          sycl::span<const event> DepEvents,
-                          SubmitCommandFuncType &SubmitCommandFunc) {
+detail::EventImplPtr queue_impl::submit_direct(
+    bool CallerNeedsEvent, sycl::span<const event> DepEvents,
+    SubmitCommandFuncType &SubmitCommandFunc, detail::CGType Type,
+    bool InsertBarrierForInOrderCommand) {
   detail::CG::StorageInitHelper CGData;
   std::unique_lock<std::mutex> Lock(MMutex);
+  const bool inOrder = isInOrder();
 
-  // Used by queue_empty() and getLastEvent()
-  MEmpty.store(false, std::memory_order_release);
+  NestedCallsTracker tracker;
 
   // Sync with an external event
   std::optional<event> ExternalEvent = popExternalEvent();
@@ -646,29 +848,35 @@ queue_impl::submit_direct(bool CallerNeedsEvent,
     registerEventDependency</*LockQueue*/ false>(
         getSyclObjImpl(*ExternalEvent), CGData.MEvents, this, getContextImpl(),
         getDeviceImpl(), hasCommandGraph() ? getCommandGraph().get() : nullptr,
-        detail::CGType::Kernel);
+        Type);
   }
 
   auto &Deps = hasCommandGraph() ? MExtGraphDeps : MDefaultGraphDeps;
 
   // Sync with the last event for in order queue
   EventImplPtr &LastEvent = Deps.LastEventPtr;
-  if (isInOrder() && LastEvent) {
+  if (inOrder && LastEvent) {
     registerEventDependency</*LockQueue*/ false>(
         LastEvent, CGData.MEvents, this, getContextImpl(), getDeviceImpl(),
-        hasCommandGraph() ? getCommandGraph().get() : nullptr,
-        detail::CGType::Kernel);
+        hasCommandGraph() ? getCommandGraph().get() : nullptr, Type);
+  } else if (inOrder && !MEmpty.load(std::memory_order_acquire) &&
+             InsertBarrierForInOrderCommand) {
+    // A barrier is injected to ensure ordering with prior commands
+    auto ResEvent = insertHelperBarrier();
+    registerEventDependency</*LockQueue*/ false>(
+        ResEvent, CGData.MEvents, this, getContextImpl(), getDeviceImpl(),
+        hasCommandGraph() ? getCommandGraph().get() : nullptr, Type);
   }
 
   for (event e : DepEvents) {
     registerEventDependency</*LockQueue*/ false>(
         getSyclObjImpl(e), CGData.MEvents, this, getContextImpl(),
         getDeviceImpl(), hasCommandGraph() ? getCommandGraph().get() : nullptr,
-        detail::CGType::Kernel);
+        Type);
   }
 
   // Barrier and un-enqueued commands synchronization for out or order queue
-  if (!isInOrder()) {
+  if (!inOrder) {
     MMissedCleanupRequests.unset(
         [&](MissedCleanupRequestsType &MissedCleanupRequests) {
           for (auto &UpdatedGraph : MissedCleanupRequests)
@@ -676,67 +884,72 @@ queue_impl::submit_direct(bool CallerNeedsEvent,
           MissedCleanupRequests.clear();
         });
 
+    if (Type == CGType::Barrier && !Deps.UnenqueuedCmdEvents.empty()) {
+      for (const EventImplPtr &Event : Deps.UnenqueuedCmdEvents) {
+        CGData.MEvents.push_back(Event);
+      }
+    }
+
     if (Deps.LastBarrier && !Deps.LastBarrier->isEnqueued()) {
       CGData.MEvents.push_back(Deps.LastBarrier);
     }
   }
 
-  bool SchedulerBypass =
-      (CGData.MEvents.size() > 0
-           ? detail::Scheduler::areEventsSafeForSchedulerBypass(
-                 CGData.MEvents, getContextImpl())
-           : true) &&
-      !hasCommandGraph();
+  // Used by queue_empty() and getLastEvent()
+  MEmpty.store(false, std::memory_order_release);
+
+  auto [EventImpl, SchedulerBypass] = SubmitCommandFunc(std::move(CGData));
 
   // Synchronize with the "no last event mode", used by the handler-based
   // kernel submit path
-  MNoLastEventMode.store(isInOrder() && SchedulerBypass,
-                         std::memory_order_relaxed);
-
-  EventImplPtr EventImpl = SubmitCommandFunc(CGData, SchedulerBypass);
+  MNoLastEventMode.store(inOrder && SchedulerBypass, std::memory_order_relaxed);
 
   // Sync with the last event for in order queue. For scheduler-bypass flow,
   // the ordering is done at the layers below the SYCL runtime,
   // but for the scheduler-based flow, it needs to be done here, as the
   // scheduler handles host task submissions.
-  if (isInOrder()) {
+  if (inOrder) {
     LastEvent = SchedulerBypass ? nullptr : EventImpl;
   }
 
-  // Barrier and un-enqueued commands synchronization for out or order queue
-  if (!isInOrder() && !EventImpl->isEnqueued()) {
-    Deps.UnenqueuedCmdEvents.push_back(EventImpl);
+  // Barrier and un-enqueued commands synchronization for out or order queue.
+  // The event must also be stored for future wait calls.
+  if (!inOrder) {
+    if (Type == CGType::Barrier || Type == CGType::BarrierWaitlist) {
+      Deps.LastBarrier = EventImpl;
+      Deps.UnenqueuedCmdEvents.clear();
+    } else if (!EventImpl->isEnqueued()) {
+      Deps.UnenqueuedCmdEvents.push_back(EventImpl);
+    }
+    addEventUnlocked(EventImpl);
   }
 
-  return CallerNeedsEvent ? EventImpl : nullptr;
+  return CallerNeedsEvent ? std::move(EventImpl) : nullptr;
 }
 
 template <typename HandlerFuncT>
-event queue_impl::submitWithHandler(const std::vector<event> &DepEvents,
-                                    bool CallerNeedsEvent,
-                                    HandlerFuncT HandlerFunc) {
-  v1::SubmissionInfo SI{};
+EventImplPtr queue_impl::submitWithHandler(const std::vector<event> &DepEvents,
+                                           bool CallerNeedsEvent,
+                                           HandlerFuncT HandlerFunc) {
   auto L = [&](handler &CGH) {
     CGH.depends_on(DepEvents);
     HandlerFunc(CGH);
   };
   detail::type_erased_cgfo_ty CGF{L};
 
-  if (!CallerNeedsEvent && supportsDiscardingPiEvents()) {
-    submit_without_event(CGF, SI,
-                         /*CodeLoc*/ {}, /*IsTopCodeLoc*/ true);
-    return createSyclObjFromImpl<event>(event_impl::create_discarded_event());
-  }
-  return submit_with_event(CGF, SI,
-                           /*CodeLoc*/ {}, /*IsTopCodeLoc*/ true);
+  const bool ReturnEvent = CallerNeedsEvent || !isInOrder();
+  EventImplPtr EventImpl =
+      submit_impl(CGF, ReturnEvent, /*CodeLoc*/ {}, /*IsTopCodeLoc*/ true,
+                  /*SubmissionInfo*/ {});
+  assert(ReturnEvent == !!EventImpl);
+  return EventImpl;
 }
 
 template <typename HandlerFuncT, typename MemOpFuncT, typename... MemOpArgTs>
-event queue_impl::submitMemOpHelper(const std::vector<event> &DepEvents,
-                                    bool CallerNeedsEvent,
-                                    HandlerFuncT HandlerFunc,
-                                    MemOpFuncT MemOpFunc,
-                                    MemOpArgTs &&...MemOpArgs) {
+EventImplPtr
+queue_impl::submitMemOpHelper(const std::vector<event> &DepEvents,
+                              bool CallerNeedsEvent, HandlerFuncT HandlerFunc,
+                              MemOpFuncT MemOpFunc, MemOpArgTs &&...MemOpArgs) {
   // We need to submit command and update the last event under same lock if we
   // have in-order queue.
   {
@@ -757,43 +970,41 @@ event queue_impl::submitMemOpHelper(const std::vector<event> &DepEvents,
         NestedCallsTracker tracker;
         MemOpFunc(std::forward<MemOpArgTs>(MemOpArgs)...,
                   getUrEvents(ExpandedDepEvents),
-                  /*PiEvent*/ nullptr);
+                  /*UrEvent*/ nullptr);
 
-        return createSyclObjFromImpl<event>(
-            event_impl::create_discarded_event());
+        return nullptr;
       }
 
-      event ResEvent = prepareSYCLEventAssociatedWithQueue(*this);
-      const auto &EventImpl = detail::getSyclObjImpl(ResEvent);
+      EventImplPtr ResEventImpl = prepareSYCLEventAssociatedWithQueue(*this);
       {
         NestedCallsTracker tracker;
         ur_event_handle_t UREvent = nullptr;
-        EventImpl->setSubmissionTime();
+        ResEventImpl->setSubmissionTime();
         MemOpFunc(std::forward<MemOpArgTs>(MemOpArgs)...,
                   getUrEvents(ExpandedDepEvents), &UREvent);
-        EventImpl->setHandle(UREvent);
-        EventImpl->setEnqueued();
+        ResEventImpl->setHandle(UREvent);
+        ResEventImpl->setEnqueued();
         // connect returned event with dependent events
         if (!isInOrder()) {
           std::vector<EventImplPtr> &ExpandedDepEventImplPtrs =
-              EventImpl->getPreparedDepsEvents();
+              ResEventImpl->getPreparedDepsEvents();
           ExpandedDepEventImplPtrs.reserve(ExpandedDepEvents.size());
           for (const event &DepEvent : ExpandedDepEvents)
             ExpandedDepEventImplPtrs.push_back(
                 detail::getSyclObjImpl(DepEvent));
 
-          // EventImpl is local for current thread, no need to lock.
-          EventImpl->cleanDepEventsThroughOneLevelUnlocked();
+          // ResEventImpl is local for current thread, no need to lock.
+          ResEventImpl->cleanDepEventsThroughOneLevelUnlocked();
         }
       }
 
       if (isInOrder() && !isNoEventsMode) {
         auto &EventToStoreIn = MGraph.expired() ? MDefaultGraphDeps.LastEventPtr
                                                 : MExtGraphDeps.LastEventPtr;
-        EventToStoreIn = EventImpl;
+        EventToStoreIn = ResEventImpl;
       }
 
-      return ResEvent;
+      return ResEventImpl;
     }
   }
   return submitWithHandler(DepEvents, CallerNeedsEvent, HandlerFunc);
@@ -829,12 +1040,16 @@ void *queue_impl::instrumentationProlog(const detail::code_location &CodeLoc,
 
   IId = xptiGetUniqueId();
   auto WaitEvent = Event->event_ref();
-  // We will allow the device type to be set
-  xpti::addMetadata(WaitEvent, "sycl_device_type", queueDeviceToString(this));
-  // We limit the amount of metadata that is added to the regular stream.
-  // Only "sycl.debug" stream will have the full information. This improves the
-  // performance when this data is not required by the tool or the collector.
-  if (isDebugStream(StreamID)) {
+  if (detail::GSYCLStreamDetailLevel >=
+          xpti::stream_detail_level_t::XPTI_STREAM_DETAIL_LEVEL_NORMAL ||
+      isDebugStream(StreamID)) {
+    xpti::addMetadata(WaitEvent, "sycl_device_type", queueDeviceToString(this));
+  }
+  // Full metadata is added only at VERBOSE level or if subscribing to
+  // sycl.debug stream.
+  if (detail::GSYCLStreamDetailLevel >=
+          xpti::stream_detail_level_t::XPTI_STREAM_DETAIL_LEVEL_VERBOSE ||
+      isDebugStream(StreamID)) {
     if (HasSourceInfo) {
       xpti::addMetadata(WaitEvent, "sym_function_name", CodeLoc.functionName());
       xpti::addMetadata(WaitEvent, "sym_source_file_name", CodeLoc.fileName());
@@ -918,32 +1133,7 @@ void queue_impl::wait(const detail::code_location &CodeLoc) {
       LastEvent->wait();
     }
   } else if (!isInOrder()) {
-    std::vector<std::weak_ptr<event_impl>> WeakEvents;
-    {
-      std::lock_guard<std::mutex> Lock(MMutex);
-      WeakEvents.swap(MEventsWeak);
-      MMissedCleanupRequests.unset(
-          [&](MissedCleanupRequestsType &MissedCleanupRequests) {
-            for (auto &UpdatedGraph : MissedCleanupRequests)
-              doUnenqueuedCommandCleanup(UpdatedGraph);
-            MissedCleanupRequests.clear();
-          });
-    }
-
-    // Wait for unenqueued or host task events, starting
-    // from the latest submitted task in order to minimize total amount of
-    // calls, then handle the rest with urQueueFinish.
-    for (auto EventImplWeakPtrIt = WeakEvents.rbegin();
-         EventImplWeakPtrIt != WeakEvents.rend(); ++EventImplWeakPtrIt) {
-      if (std::shared_ptr<event_impl> EventImplSharedPtr =
-              EventImplWeakPtrIt->lock()) {
-        // A nullptr UR event indicates that urQueueFinish will not cover it,
-        // either because it's a host task event or an unenqueued one.
-        if (nullptr == EventImplSharedPtr->getHandle()) {
-          EventImplSharedPtr->wait();
-        }
-      }
-    }
+    waitForRuntimeLevelCmdsAndClear();
   }
 
   getAdapter().call<UrApiKind::urQueueFinish>(getHandleRef());
@@ -987,18 +1177,20 @@ void queue_impl::constructorNotification() {
   xpti_td *TEvent = Event->event_ref();
   // Cache the trace event, stream id and instance IDs for the destructor.
   MTraceEvent = (void *)TEvent;
-  // We will allow the queue metadata to be set as this is performed
-  // infrequently.
-  xpti::addMetadata(TEvent, "sycl_context",
-                    reinterpret_cast<size_t>(MContext->getHandleRef()));
-  xpti::addMetadata(TEvent, "sycl_device_name",
-                    MDevice.get_info<info::device::name>());
-  xpti::addMetadata(TEvent, "sycl_device",
-                    reinterpret_cast<size_t>(MDevice.getHandleRef()));
-  xpti::addMetadata(TEvent, "is_inorder", MIsInorder);
-  xpti::addMetadata(TEvent, "queue_id", MQueueID);
-  xpti::addMetadata(TEvent, "queue_handle",
-                    reinterpret_cast<size_t>(getHandleRef()));
+  if (detail::GSYCLStreamDetailLevel >=
+          xpti::stream_detail_level_t::XPTI_STREAM_DETAIL_LEVEL_NORMAL ||
+      isDebugStream(detail::getActiveXPTIStreamID())) {
+    xpti::addMetadata(TEvent, "sycl_context",
+                      reinterpret_cast<size_t>(MContext->getHandleRef()));
+    xpti::addMetadata(TEvent, "sycl_device_name",
+                      MDevice.get_info<info::device::name>());
+    xpti::addMetadata(TEvent, "sycl_device",
+                      reinterpret_cast<size_t>(MDevice.getHandleRef()));
+    xpti::addMetadata(TEvent, "is_inorder", MIsInorder);
+    xpti::addMetadata(TEvent, "queue_id", MQueueID);
+    xpti::addMetadata(TEvent, "queue_handle",
+                      reinterpret_cast<size_t>(getHandleRef()));
+  }
   // Also publish to TLS before notification.
   xpti::framework::stash_tuple(XPTI_QUEUE_INSTANCE_ID_KEY, MQueueID);
   xptiNotifySubscribers(detail::getActiveXPTIStreamID(),
@@ -1051,36 +1243,25 @@ bool queue_impl::queue_empty() const {
       return MDefaultGraphDeps.LastEventPtr
                  ->get_info<info::event::command_execution_status>() ==
              info::event_command_status::complete;
+  } else {
+    // Check events that haven't been submitted to the backend (host
+    // tasks and blocked commands).
+    std::lock_guard<std::mutex> Lock(MMutex);
+    for (auto EventImplWeakPtrIt = MEventsWeak.begin();
+         EventImplWeakPtrIt != MEventsWeak.end(); ++EventImplWeakPtrIt)
+      if (std::shared_ptr<event_impl> EventImplSharedPtr =
+              EventImplWeakPtrIt->lock())
+        if (nullptr == EventImplSharedPtr->getHandle() &&
+            EventImplSharedPtr
+                    ->get_info<info::event::command_execution_status>() !=
+                info::event_command_status::complete)
+          return false;
   }
 
-  // Check the status of the backend queue if this is not a host queue.
   ur_bool_t IsReady = false;
   getAdapter().call<UrApiKind::urQueueGetInfo>(
       MQueue, UR_QUEUE_INFO_EMPTY, sizeof(IsReady), &IsReady, nullptr);
-  if (!IsReady)
-    return false;
-
-  // If got here, it means that LastEventPtr is nullptr (so no possible Host
-  // Tasks) and there is nothing executing on the device.
-  if (isInOrder())
-    return true;
-
-  // We may have events like host tasks which are not submitted to the backend
-  // queue so we need to get their status separately.
-  std::lock_guard<std::mutex> Lock(MMutex);
-  for (auto EventImplWeakPtrIt = MEventsWeak.begin();
-       EventImplWeakPtrIt != MEventsWeak.end(); ++EventImplWeakPtrIt)
-    if (std::shared_ptr<event_impl> EventImplSharedPtr =
-            EventImplWeakPtrIt->lock())
-      if (EventImplSharedPtr->isHost() &&
-          EventImplSharedPtr
-                  ->get_info<info::event::command_execution_status>() !=
-              info::event_command_status::complete)
-        return false;
-
-  // If we didn't exit early above then it means that all events in the queue
-  // are completed.
-  return true;
+  return IsReady;
 }
 
 void queue_impl::revisitUnenqueuedCommandsState(
@@ -1154,6 +1335,56 @@ void queue_impl::verifyProps(const property_list &Props) const {
   };
   detail::PropertyValidator::checkPropsAndThrow(Props, CheckDataLessProperties,
                                                 CheckPropertiesWithData);
+}
+
+EventImplPtr queue_impl::insertHelperBarrier() {
+  auto ResEvent = detail::event_impl::create_device_event(*this);
+  ur_event_handle_t UREvent = nullptr;
+  getAdapter().call<UrApiKind::urEnqueueEventsWaitWithBarrier>(
+      getHandleRef(), 0, nullptr, &UREvent);
+  ResEvent->setHandle(UREvent);
+  return ResEvent;
+}
+
+void queue_impl::waitForRuntimeLevelCmdsAndClear() {
+  if (isInOrder() && !MNoLastEventMode.load(std::memory_order_relaxed)) {
+    // if MLastEvent is not null and has no associated handle, we need to wait
+    // for it. We do not clear it however.
+    EventImplPtr LastEvent;
+    {
+      std::lock_guard<std::mutex> Lock(MMutex);
+      LastEvent = MDefaultGraphDeps.LastEventPtr;
+    }
+    if (LastEvent && nullptr == LastEvent->getHandle())
+      LastEvent->wait();
+  } else if (!isInOrder()) {
+    std::vector<std::weak_ptr<event_impl>> WeakEvents;
+    {
+      std::lock_guard<std::mutex> Lock(MMutex);
+      WeakEvents.swap(MEventsWeak);
+      MMissedCleanupRequests.unset(
+          [&](MissedCleanupRequestsType &MissedCleanupRequests) {
+            for (auto &UpdatedGraph : MissedCleanupRequests)
+              doUnenqueuedCommandCleanup(UpdatedGraph);
+            MissedCleanupRequests.clear();
+          });
+    }
+
+    // Wait for unenqueued or host task events, starting
+    // from the latest submitted task in order to minimize total amount of
+    // calls, then handle the rest with urQueueFinish.
+    for (auto EventImplWeakPtrIt = WeakEvents.rbegin();
+         EventImplWeakPtrIt != WeakEvents.rend(); ++EventImplWeakPtrIt) {
+      if (std::shared_ptr<event_impl> EventImplSharedPtr =
+              EventImplWeakPtrIt->lock()) {
+        // A nullptr UR event indicates that urQueueFinish will not cover it,
+        // either because it's a host task event or an unenqueued one.
+        if (nullptr == EventImplSharedPtr->getHandle()) {
+          EventImplSharedPtr->wait();
+        }
+      }
+    }
+  }
 }
 
 } // namespace detail

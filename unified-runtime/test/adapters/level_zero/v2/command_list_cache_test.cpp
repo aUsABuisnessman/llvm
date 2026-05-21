@@ -1,6 +1,5 @@
-// Copyright (C) 2024 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -15,6 +14,7 @@
 
 #include "uur/fixtures.h"
 #include "uur/raii.h"
+#include "uur/utils.h"
 
 #include <gtest/gtest.h>
 #include <map>
@@ -34,7 +34,8 @@ struct CommandListCacheTest : public uur::urContextTest {
 UUR_INSTANTIATE_DEVICE_TEST_SUITE(CommandListCacheTest);
 
 TEST_P(CommandListCacheTest, CanStoreAndRetriveImmediateAndRegularCmdLists) {
-  v2::supported_extensions_descriptor_t supportedExtensions(false, false);
+  v2::supported_extensions_descriptor_t supportedExtensions(false, false, false,
+                                                            false);
   v2::command_list_cache_t cache(context->getZeHandle(), supportedExtensions);
 
   bool IsInOrder = false;
@@ -90,7 +91,8 @@ TEST_P(CommandListCacheTest, CanStoreAndRetriveImmediateAndRegularCmdLists) {
 }
 
 TEST_P(CommandListCacheTest, ImmediateCommandListsHaveProperAttributes) {
-  v2::supported_extensions_descriptor_t supportedExtensions(false, false);
+  v2::supported_extensions_descriptor_t supportedExtensions(false, false, false,
+                                                            false);
   v2::command_list_cache_t cache(context->getZeHandle(), supportedExtensions);
 
   uint32_t numQueueGroups = 0;
@@ -186,6 +188,7 @@ TEST_P(CommandListCacheTest, ImmediateCommandListsHaveProperAttributes) {
 TEST_P(CommandListCacheTest, CommandListsAreReusedByQueues) {
   static constexpr int NumQueuesPerType = 5;
   size_t NumUniqueQueueTypes = 0;
+  bool isBatched = false;
 
   for (int I = 0; I < NumQueuesPerType; I++) {
     NumUniqueQueueTypes = 0;
@@ -216,6 +219,8 @@ TEST_P(CommandListCacheTest, CommandListsAreReusedByQueues) {
           ASSERT_EQ(urQueueCreate(context, device, &QueueProps, Queue.ptr()),
                     UR_RESULT_SUCCESS);
 
+          ASSERT_NO_FATAL_FAILURE(uur::isQueueBatched(Queue, &isBatched));
+
           Queues.emplace_back(Queue);
         }
       }
@@ -227,7 +232,13 @@ TEST_P(CommandListCacheTest, CommandListsAreReusedByQueues) {
 
     ASSERT_EQ(context->getCommandListCache().getNumImmediateCommandLists(),
               NumUniqueQueueTypes);
-    ASSERT_EQ(context->getCommandListCache().getNumRegularCommandLists(), 0);
+
+    if (isBatched) {
+      ASSERT_EQ(context->getCommandListCache().getNumRegularCommandLists(),
+                NumUniqueQueueTypes);
+    } else {
+      ASSERT_EQ(context->getCommandListCache().getNumRegularCommandLists(), 0);
+    }
   }
 }
 

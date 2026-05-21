@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include <uur/fixtures.h>
@@ -125,8 +124,6 @@ TEST_P(urQueueGetInfoTest, SuccessRoundtripNullDevice) {
 }
 
 TEST_P(urQueueGetInfoTest, SuccessFlags) {
-  UUR_KNOWN_FAILURE_ON(uur::NativeCPU{});
-
   size_t property_size = 0;
   const ur_queue_info_t property_name = UR_QUEUE_INFO_FLAGS;
 

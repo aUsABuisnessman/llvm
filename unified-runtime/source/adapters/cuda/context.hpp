@@ -1,9 +1,8 @@
 //===--------- context.hpp - CUDA Adapter ---------------------------------===//
 //
-// Copyright (C) 2023 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
@@ -11,7 +10,7 @@
 
 #include <cuda.h>
 #include <memory>
-#include <ur_api.h>
+#include <unified-runtime/ur_api.h>
 
 #include <atomic>
 #include <mutex>
@@ -107,14 +106,14 @@ struct ur_context_handle_t_ : ur::cuda::handle_base {
     UR_CHECK_ERROR(urAdapterRetain(ur::cuda::adapter));
   };
 
-  ~ur_context_handle_t_() {
+  ~ur_context_handle_t_() noexcept {
     if (MemoryPoolHost) {
       umfPoolDestroy(MemoryPoolHost);
     }
     if (MemoryProviderHost) {
       umfMemoryProviderDestroy(MemoryProviderHost);
     }
-    UR_CHECK_ERROR(urAdapterRelease(ur::cuda::adapter));
+    urAdapterRelease(ur::cuda::adapter);
   }
 
   void invokeExtendedDeleters() {

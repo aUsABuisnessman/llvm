@@ -1,16 +1,16 @@
 //===----------- device.cpp - LLVM Offload Adapter  -----------------------===//
 //
-// Copyright (C) 2025 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include <OffloadAPI.h>
+#include <limits>
+#include <unified-runtime/ur_api.h>
 #include <ur/ur.hpp>
-#include <ur_api.h>
 
 #include "adapters/offload/adapter.hpp"
 #include "device.hpp"
@@ -52,8 +52,26 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
     return ReturnValue(nullptr);
   case UR_DEVICE_INFO_VERSION:
     return ReturnValue("");
-  case UR_DEVICE_INFO_EXTENSIONS:
-    return ReturnValue("");
+  case UR_DEVICE_INFO_EXTENSIONS: {
+    std::string SupportedExtensions = "cl_khr_il_program ";
+
+    bool DoubleFPSupport = false;
+    if (olGetDeviceInfo(
+            hDevice->OffloadDevice, OL_DEVICE_INFO_DOUBLE_FP_SUPPORT,
+            sizeof(DoubleFPSupport), &DoubleFPSupport) == OL_SUCCESS &&
+        DoubleFPSupport) {
+      SupportedExtensions += "cl_khr_fp64 ";
+    }
+
+    bool HalfFPSupport = false;
+    if (olGetDeviceInfo(hDevice->OffloadDevice, OL_DEVICE_INFO_HALF_FP_SUPPORT,
+                        sizeof(HalfFPSupport), &HalfFPSupport) == OL_SUCCESS &&
+        HalfFPSupport) {
+      SupportedExtensions += "cl_khr_fp16 ";
+    }
+
+    return ReturnValue(SupportedExtensions.c_str());
+  }
   case UR_DEVICE_INFO_USE_NATIVE_ASSERT:
     return ReturnValue(false);
   case UR_DEVICE_INFO_TYPE:
@@ -85,14 +103,28 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
     olInfo = OL_DEVICE_INFO_NUM_COMPUTE_UNITS;
     break;
   case UR_DEVICE_INFO_SINGLE_FP_CONFIG:
-    olInfo = OL_DEVICE_INFO_SINGLE_FP_CONFIG;
-    break;
   case UR_DEVICE_INFO_HALF_FP_CONFIG:
-    olInfo = OL_DEVICE_INFO_HALF_FP_CONFIG;
+  case UR_DEVICE_INFO_DOUBLE_FP_CONFIG: {
+    ol_device_info_t SupportInfo;
+    if (propName == UR_DEVICE_INFO_SINGLE_FP_CONFIG) {
+      SupportInfo = OL_DEVICE_INFO_SINGLE_FP_SUPPORT;
+      olInfo = OL_DEVICE_INFO_SINGLE_FP_CONFIG;
+    } else if (propName == UR_DEVICE_INFO_HALF_FP_CONFIG) {
+      SupportInfo = OL_DEVICE_INFO_HALF_FP_SUPPORT;
+      olInfo = OL_DEVICE_INFO_HALF_FP_CONFIG;
+    } else {
+      SupportInfo = OL_DEVICE_INFO_DOUBLE_FP_SUPPORT;
+      olInfo = OL_DEVICE_INFO_DOUBLE_FP_CONFIG;
+    }
+
+    bool Supported = false;
+    if (olGetDeviceInfo(hDevice->OffloadDevice, SupportInfo, sizeof(Supported),
+                        &Supported) != OL_SUCCESS ||
+        !Supported) {
+      return ReturnValue(ur_device_fp_capability_flags_t{0});
+    }
     break;
-  case UR_DEVICE_INFO_DOUBLE_FP_CONFIG:
-    olInfo = OL_DEVICE_INFO_DOUBLE_FP_CONFIG;
-    break;
+  }
   case UR_DEVICE_INFO_PREFERRED_VECTOR_WIDTH_CHAR:
   case UR_DEVICE_INFO_NATIVE_VECTOR_WIDTH_CHAR:
     olInfo = OL_DEVICE_INFO_NATIVE_VECTOR_WIDTH_CHAR;
@@ -106,7 +138,9 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
     olInfo = OL_DEVICE_INFO_NATIVE_VECTOR_WIDTH_INT;
     break;
   case UR_DEVICE_INFO_PREFERRED_VECTOR_WIDTH_LONG:
+  case UR_DEVICE_INFO_PREFERRED_VECTOR_WIDTH_LONG_LONG:
   case UR_DEVICE_INFO_NATIVE_VECTOR_WIDTH_LONG:
+  case UR_DEVICE_INFO_NATIVE_VECTOR_WIDTH_LONG_LONG:
     olInfo = OL_DEVICE_INFO_NATIVE_VECTOR_WIDTH_LONG;
     break;
   case UR_DEVICE_INFO_PREFERRED_VECTOR_WIDTH_FLOAT:
@@ -205,6 +239,27 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
       urVec[0] = olVec.x;
       urVec[1] = olVec.y;
       urVec[2] = olVec.z;
+    }
+
+    return UR_RESULT_SUCCESS;
+  }
+  case UR_DEVICE_INFO_MAX_WORK_GROUPS: {
+    // OL dimensions are uint32_t while UR is size_t, so they need to be mapped.
+    if (pPropSizeRet) {
+      *pPropSizeRet = sizeof(size_t);
+    }
+
+    if (pPropValue) {
+      ol_dimensions_t olVec;
+      OL_RETURN_ON_ERR(olGetDeviceInfo(
+          hDevice->OffloadDevice, OL_DEVICE_INFO_MAX_WORK_SIZE_PER_DIMENSION,
+          sizeof(olVec), &olVec));
+
+      // Multiply the max group counts in each dimension to get the total max
+      // number of work groups. Prevent overflow.
+      *reinterpret_cast<size_t *>(pPropValue) = multiplyWithOverflowCheck(
+          static_cast<size_t>(olVec.x), static_cast<size_t>(olVec.y),
+          static_cast<size_t>(olVec.z));
     }
 
     return UR_RESULT_SUCCESS;
@@ -359,6 +414,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceGetInfo(ur_device_handle_t hDevice,
   case UR_DEVICE_INFO_MAX_WRITE_IMAGE_ARGS:
   case UR_DEVICE_INFO_MAX_SAMPLERS:
     return ReturnValue(uint32_t{0});
+  case UR_DEVICE_INFO_ENQUEUE_HOST_TASK_SUPPORT_EXP:
+    return ReturnValue(false);
   default:
     return UR_RESULT_ERROR_UNSUPPORTED_ENUMERATION;
   }
@@ -456,6 +513,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urDeviceSelectBinary(
     ImageTarget = UR_DEVICE_BINARY_TARGET_NVPTX64;
   } else if (Backend == OL_PLATFORM_BACKEND_AMDGPU) {
     ImageTarget = UR_DEVICE_BINARY_TARGET_AMDGCN;
+  } else if (Backend == OL_PLATFORM_BACKEND_LEVEL_ZERO) {
+    ImageTarget = UR_DEVICE_BINARY_TARGET_SPIRV64;
   }
 
   for (uint32_t i = 0; i < NumBinaries; ++i) {

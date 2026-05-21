@@ -23,7 +23,7 @@ void run(std::vector<std::string_view> ExtraHeaders) {
     // These are necessary:
     preamble << R"""(
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 )""";
 
     for (std::string_view Header : ExtraHeaders)
@@ -102,4 +102,5 @@ int main(int argc, char **argv) {
   run({"sycl/multi_ptr.hpp"});
   run({"sycl/builtins.hpp"});
   run({"sycl/ext/oneapi/matrix/matrix.hpp"});
+  run({"sycl/sycl.hpp"});
 }

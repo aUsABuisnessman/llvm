@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -33,7 +32,8 @@ struct urProgramCreateWithNativeHandleTest : uur::urProgramTest {
   ur_native_handle_t native_program_handle = 0;
   ur_program_handle_t native_program = nullptr;
 };
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urProgramCreateWithNativeHandleTest);
+
+UUR_DEVICE_TEST_SUITE_WITH_DEFAULT_QUEUE(urProgramCreateWithNativeHandleTest);
 
 TEST_P(urProgramCreateWithNativeHandleTest, Success) {
   UUR_ASSERT_SUCCESS_OR_UNSUPPORTED(urProgramCreateWithNativeHandle(

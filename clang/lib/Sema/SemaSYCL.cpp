@@ -661,17 +661,10 @@ static void collectSYCLAttributes(FunctionDecl *FD,
       // FIXME: Make this list self-adapt as new SYCL attributes are added.
       return isa<IntelReqdSubGroupSizeAttr, IntelNamedSubGroupSizeAttr,
                  SYCLReqdWorkGroupSizeAttr, SYCLWorkGroupSizeHintAttr,
-                 SYCLIntelKernelArgsRestrictAttr, SYCLIntelNumSimdWorkItemsAttr,
-                 SYCLIntelSchedulerTargetFmaxMhzAttr,
-                 SYCLIntelMaxWorkGroupSizeAttr, SYCLIntelMaxGlobalWorkDimAttr,
+                 SYCLIntelKernelArgsRestrictAttr,
                  SYCLIntelMinWorkGroupsPerComputeUnitAttr,
-                 SYCLIntelMaxWorkGroupsPerMultiprocessorAttr,
-                 SYCLIntelNoGlobalWorkOffsetAttr, SYCLSimdAttr,
-                 SYCLIntelLoopFuseAttr, SYCLIntelMaxConcurrencyAttr,
-                 SYCLIntelDisableLoopPipeliningAttr,
-                 SYCLIntelInitiationIntervalAttr,
-                 SYCLIntelUseStallEnableClustersAttr, SYCLDeviceHasAttr,
-                 SYCLAddIRAttributesFunctionAttr>(A);
+                 SYCLIntelMaxWorkGroupsPerMultiprocessorAttr, SYCLSimdAttr,
+                 SYCLDeviceHasAttr, SYCLAddIRAttributesFunctionAttr>(A);
     });
   }
 }
@@ -911,7 +904,7 @@ class SingleDeviceFunctionTracker {
     // a SYCLKernel or SYCLDevice attribute on it, add it to the set of
     // routines potentially reachable on device. This is to diagnose such
     // cases later in finalizeSYCLDelayedAnalysis().
-    if (!CurrentDecl->isDefined() && !CurrentDecl->hasAttr<DeviceKernelAttr>() &&
+    if (!CurrentDecl->isDefined() && !CurrentDecl->hasAttr<SYCLKernelAttr>() &&
         !CurrentDecl->hasAttr<SYCLDeviceAttr>())
       Parent.SemaSYCLRef.addFDToReachableFromSyclDevice(CurrentDecl,
                                                         CallStack.back());
@@ -971,7 +964,7 @@ class SingleDeviceFunctionTracker {
     if (isSYCLKernelBodyFunction(CurrentDecl)) {
       // This is a direct callee of the kernel.
       if (CallStack.size() == 1 &&
-          CallStack.back()->hasAttr<DeviceKernelAttr>()) {
+          CallStack.back()->hasAttr<SYCLKernelAttr>()) {
         assert(!KernelBody && "inconsistent call graph - only one kernel body "
                               "function can be called");
         KernelBody = CurrentDecl;
@@ -1779,6 +1772,11 @@ protected:
   SemaSYCL &SemaSYCLRef;
   SyclKernelFieldHandler(SemaSYCL &S) : SemaSYCLRef(S) {}
 
+  // Holds the last handled kernel struct parameter that contains a special
+  // type. Set in the enterStruct functions. Only relevant for free function
+  // kernels
+  ParmVarDecl *ParentStruct = nullptr;
+
   // Returns 'true' if the thing we're visiting (Based on the FD/QualType pair)
   // is an element of an array. FD will always be the array field. When
   // traversing the array field, Ty will be the type of the array field or the
@@ -2189,31 +2187,12 @@ public:
   }
 
   bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO manipulate struct depth once special types are supported for free
-    // function kernels.
-    // ++StructFieldDepth;
     return true;
   }
 
   bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *PD,
                    QualType ParamTy) final {
-    // TODO manipulate struct depth once special types are supported for free
-    // function kernels.
-    // --StructFieldDepth;
-    // TODO We don't yet support special types and therefore structs that
-    // require decomposition and leaving/entering. Diagnose for better user
-    // experience.
-    CXXRecordDecl *RD = ParamTy->getAsCXXRecordDecl();
-    if (RD->hasAttr<SYCLRequiresDecompositionAttr>()) {
-      Diag.Report(PD->getLocation(),
-                  diag::err_bad_kernel_param_type)
-          << ParamTy;
-      Diag.Report(PD->getLocation(),
-                  diag::note_free_function_kernel_param_type_not_supported)
-          << ParamTy;
-      IsInvalid = true;
-    }
-    return isValid();
+    return true;
   }
 
   bool enterStruct(const CXXRecordDecl *, const CXXBaseSpecifier &,
@@ -2327,8 +2306,6 @@ public:
   }
 
   bool handleSyclSpecialType(ParmVarDecl *, QualType) final {
-    // TODO We don't support special types in free function kernel parameters,
-    // but track them to diagnose the case properly.
     CollectionStack.back() = true;
     return true;
   }
@@ -2354,7 +2331,8 @@ public:
             SemaSYCLRef.getASTContext()));
       PointerStack.pop_back();
     } else if (PointerStack.pop_back_val()) {
-      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>())
+      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>() &&
+          SemaSYCLRef.getLangOpts().SYCLForceGlobalASInKernelArgs)
         RD->addAttr(SYCLGenerateNewTypeAttr::CreateImplicit(
             SemaSYCLRef.getASTContext()));
     }
@@ -2390,7 +2368,8 @@ public:
       PointerStack.pop_back();
     } else if (PointerStack.pop_back_val()) {
       PointerStack.back() = true;
-      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>())
+      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>() &&
+          SemaSYCLRef.getLangOpts().SYCLForceGlobalASInKernelArgs)
         RD->addAttr(SYCLGenerateNewTypeAttr::CreateImplicit(
             SemaSYCLRef.getASTContext()));
     }
@@ -2409,7 +2388,8 @@ public:
       PointerStack.pop_back();
     } else if (PointerStack.pop_back_val()) {
       PointerStack.back() = true;
-      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>())
+      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>() &&
+          SemaSYCLRef.getLangOpts().SYCLForceGlobalASInKernelArgs)
         RD->addAttr(SYCLGenerateNewTypeAttr::CreateImplicit(
             SemaSYCLRef.getASTContext()));
     }
@@ -2439,7 +2419,8 @@ public:
       PointerStack.pop_back();
     } else if (PointerStack.pop_back_val()) {
       PointerStack.back() = true;
-      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>())
+      if (!RD->hasAttr<SYCLGenerateNewTypeAttr>() &&
+          SemaSYCLRef.getLangOpts().SYCLForceGlobalASInKernelArgs)
         RD->addAttr(SYCLGenerateNewTypeAttr::CreateImplicit(
             SemaSYCLRef.getASTContext()));
     }
@@ -2473,7 +2454,8 @@ public:
       CollectionStack.back() = true;
       PointerStack.pop_back();
     } else if (PointerStack.pop_back_val()) {
-      if (!FD->hasAttr<SYCLGenerateNewTypeAttr>())
+      if (!FD->hasAttr<SYCLGenerateNewTypeAttr>() &&
+          SemaSYCLRef.getLangOpts().SYCLForceGlobalASInKernelArgs)
         FD->addAttr(SYCLGenerateNewTypeAttr::CreateImplicit(
             SemaSYCLRef.getASTContext()));
       PointerStack.back() = true;
@@ -2495,6 +2477,7 @@ static QualType ModifyAddressSpace(SemaSYCL &SemaSYCLRef, QualType Ty) {
   // same type as field but global address space, because OpenCL requires it.
   // Function pointers should have program address space. This is set in
   // CodeGen.
+  Qualifiers PtrQuals = Ty.getQualifiers();
   QualType PointeeTy = Ty->getPointeeType();
   Qualifiers Quals = PointeeTy.getQualifiers();
   LangAS AS = Quals.getAddressSpace();
@@ -2505,7 +2488,8 @@ static QualType ModifyAddressSpace(SemaSYCL &SemaSYCLRef, QualType Ty) {
     Quals.setAddressSpace(LangAS::sycl_global);
   PointeeTy = SemaSYCLRef.getASTContext().getQualifiedType(
       PointeeTy.getUnqualifiedType(), Quals);
-  return SemaSYCLRef.getASTContext().getPointerType(PointeeTy);
+  QualType PtrTy = SemaSYCLRef.getASTContext().getPointerType(PointeeTy);
+  return SemaSYCLRef.getASTContext().getQualifiedType(PtrTy, PtrQuals);
 }
 
 // This visitor is used to traverse a non-decomposed record/array to
@@ -2599,8 +2583,6 @@ public:
   }
 
   bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
     return true;
   }
 
@@ -2618,9 +2600,7 @@ public:
     return true;
   }
 
-  bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+  bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *PD, QualType) final {
     return true;
   }
 
@@ -2692,11 +2672,7 @@ public:
     return true;
   }
 
-  bool handleScalarType(ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
-    return true;
-  }
+  bool handleScalarType(ParmVarDecl *, QualType) final { return true; }
 
   bool handleUnionType(FieldDecl *FD, QualType FieldTy) final {
     return handleScalarType(FD, FieldTy);
@@ -2716,8 +2692,6 @@ public:
 
   bool handleNonDecompStruct(const CXXRecordDecl *, ParmVarDecl *,
                              QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
     return true;
   }
 
@@ -3009,7 +2983,7 @@ public:
     // to TransformStmt in replaceWithLocalClone can diagnose something that got
     // diagnosed on the actual kernel.
     KernelDecl->addAttr(
-        DeviceKernelAttr::CreateImplicit(SemaSYCLRef.getASTContext()));
+        SYCLKernelAttr::CreateImplicit(SemaSYCLRef.getASTContext()));
 
     SemaSYCLRef.addSyclDeviceDecl(KernelDecl);
   }
@@ -3019,9 +2993,11 @@ public:
     return true;
   }
 
-  bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    // ++StructDepth;
+  bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType Ty) final {
+    ++StructDepth;
+    StringRef Name = "_arg_struct";
+    addParam(Name, Ty);
+    ParentStruct = Params.back();
     return true;
   }
 
@@ -3031,8 +3007,7 @@ public:
   }
 
   bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    // --StructDepth;
+    --StructDepth;
     return true;
   }
 
@@ -3222,6 +3197,7 @@ public:
     return ArrayRef<ParmVarDecl *>(std::begin(Params) + LastParamIndex,
                                    std::end(Params));
   }
+  ParmVarDecl *getParentStruct() { return ParentStruct; }
 };
 
 // This Visitor traverses the AST of the function with
@@ -4118,8 +4094,8 @@ class SyclKernelBodyCreator : public SyclKernelFieldHandler {
     Expr *ArrayRef = createSimpleArrayParamReferenceExpr(FieldTy);
     InitializationKind InitKind = InitializationKind::CreateDirect({}, {}, {});
 
-    InitializedEntity Entity = InitializedEntity::InitializeMember(
-        FD, &VarEntity.value(), /*Implicit*/ true);
+    InitializedEntity Entity =
+        InitializedEntity::InitializeMemberImplicit(FD, &VarEntity.value());
 
     addFieldInit(FD, FieldTy, ArrayRef, InitKind, Entity);
   }
@@ -4400,22 +4376,32 @@ public:
 class FreeFunctionKernelBodyCreator : public SyclKernelFieldHandler {
   SyclKernelDeclCreator &DeclCreator;
   llvm::SmallVector<Stmt *, 16> BodyStmts;
+  // Keep track of the structs we have encountered on our way to a special type.
+  // They will be needed to properly generate the __init call. Note that the
+  // top-level struct parameter is not kept track here because that is done by
+  // the DeclCreator.
+  llvm::SmallVector<FieldDecl *, 8> CurrentStructs;
   FunctionDecl *FreeFunc = nullptr;
   SourceLocation FreeFunctionSrcLoc; // Free function source location.
   llvm::SmallVector<Expr *, 8> ArgExprs;
 
-  // Creates a DeclRefExpr to the ParmVar that represents the current free
-  // function parameter.
-  Expr *createParamReferenceExpr() {
-    ParmVarDecl *FreeFunctionParameter =
-        DeclCreator.getParamVarDeclsForCurrentField()[0];
-
+  // Creates a DeclRefExpr to the ParmVar that represents an arbitrary
+  // free function parameter
+  Expr *createParamReferenceExpr(ParmVarDecl *FreeFunctionParameter) {
     QualType FreeFunctionParamType = FreeFunctionParameter->getOriginalType();
     Expr *DRE = SemaSYCLRef.SemaRef.BuildDeclRefExpr(
         FreeFunctionParameter, FreeFunctionParamType, VK_LValue,
         FreeFunctionSrcLoc);
     DRE = SemaSYCLRef.SemaRef.DefaultLvalueConversion(DRE).get();
     return DRE;
+  }
+
+  // Creates a DeclRefExpr to the ParmVar that represents the current free
+  // function parameter.
+  Expr *createParamReferenceExpr() {
+    ParmVarDecl *FreeFunctionParameter =
+        DeclCreator.getParamVarDeclsForCurrentField()[0];
+    return createParamReferenceExpr(FreeFunctionParameter);
   }
 
   // Creates a DeclRefExpr to the ParmVar that represents the current pointer
@@ -4564,9 +4550,21 @@ public:
     DeclCreator.setBody(KernelBody);
   }
 
-  bool handleSyclSpecialType(FieldDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+  bool handleSyclSpecialType(FieldDecl *FD, QualType FieldTy) final {
+    // FD represents a special type which is a field of a struct parameter
+    // passed to a free function kernel. Get this struct parameter using
+    // getParentStruct and build the __init call. Also add the struct to the
+    // list of special structs needed later by the integration header to
+    // generate some helper structs for the runtime.
+    Expr *Base = createParamReferenceExpr(DeclCreator.getParentStruct());
+    for (const auto &child : CurrentStructs) {
+      Base = buildMemberExpr(Base, child);
+    }
+    MemberExpr *MemberAccess = buildMemberExpr(Base, FD);
+    createSpecialMethodCall(FieldTy->getAsCXXRecordDecl(), InitMethodName,
+                            MemberAccess, BodyStmts);
+    SemaSYCLRef.addStructWithSpecialType(
+        DeclCreator.getParentStruct()->getType()->getAsCXXRecordDecl());
     return true;
   }
 
@@ -4575,8 +4573,8 @@ public:
   // typically if this is the case the default constructor will be private and
   // in such cases we must manually override the access specifier from private
   // to public just for the duration of this default initialization.
-  // TODO: Revisit this approach once https://github.com/intel/llvm/issues/16061
-  // is closed.
+  // TODO: Revisit this approach once
+  // https://github.com/intel/llvm/issues/16061 is closed.
   bool handleSyclSpecialType(ParmVarDecl *PD, QualType ParamTy) final {
     // The code produced looks like this in the case of a work group memory
     // parameter:
@@ -4669,11 +4667,7 @@ public:
     return true;
   }
 
-  bool handleScalarType(FieldDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
-    return true;
-  }
+  bool handleScalarType(FieldDecl *, QualType) final { return true; }
 
   bool handleScalarType(ParmVarDecl *, QualType) final {
     Expr *ParamRef = createParamReferenceExpr();
@@ -4693,27 +4687,24 @@ public:
     return true;
   }
 
-  bool enterStruct(const CXXRecordDecl *, FieldDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+  bool enterStruct(const CXXRecordDecl *, FieldDecl *FD, QualType) final {
+    CurrentStructs.push_back(FD);
     return true;
   }
 
   bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
     return true;
   }
 
   bool leaveStruct(const CXXRecordDecl *, FieldDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+    CurrentStructs.pop_back();
     return true;
   }
 
   bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+    ArgExprs.push_back(SemaSYCLRef.SemaRef.BuildDeclRefExpr(
+        DeclCreator.getParentStruct(), DeclCreator.getParentStruct()->getType(),
+        VK_PRValue, FreeFunctionSrcLoc));
     return true;
   }
 
@@ -4796,13 +4787,9 @@ class SyclKernelIntHeaderCreator : public SyclKernelFieldHandler {
     addParam(ArgTy, Kind, offsetOf(FD, ArgTy));
   }
 
-  // For free functions we increment the current offset as each parameter is
-  // added.
   void addParam(const ParmVarDecl *PD, QualType ParamTy,
                 SYCLIntegrationHeader::kernel_param_kind_t Kind) {
     addParam(ParamTy, Kind, offsetOf(PD, ParamTy));
-    CurOffset +=
-        SemaSYCLRef.getASTContext().getTypeSizeInChars(ParamTy).getQuantity();
   }
 
   void addParam(QualType ParamTy,
@@ -4986,8 +4973,8 @@ public:
   }
 
   bool handleSimpleArrayType(FieldDecl *FD, QualType FieldTy) final {
-    // Arrays are always wrapped inside of structs, so just treat it as a simple
-    // struct.
+    // Arrays are always wrapped inside of structs, so just treat it as a
+    // simple struct.
     addParam(FD, FieldTy, SYCLIntegrationHeader::kind_std_layout);
     return true;
   }
@@ -5043,9 +5030,9 @@ public:
     return true;
   }
 
-  bool enterStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+  bool enterStruct(const CXXRecordDecl *, ParmVarDecl *PD, QualType Ty) final {
+    addParam(PD, Ty, SYCLIntegrationHeader::kind_struct_with_special_type);
+    Header.setParentStruct(PD);
     return true;
   }
 
@@ -5056,8 +5043,7 @@ public:
   }
 
   bool leaveStruct(const CXXRecordDecl *, ParmVarDecl *, QualType) final {
-    // TODO
-    unsupportedFreeFunctionParamType();
+    Header.setParentStruct(nullptr);
     return true;
   }
 
@@ -5747,19 +5733,6 @@ static void PropagateAndDiagnoseDeviceAttr(SemaSYCL &S, Attr *A,
         S.Diag(RWGSA->getLocation(), diag::note_conflicting_attribute);
         SYCLKernel->setInvalidDecl();
       }
-    } else if (auto *Existing =
-                   SYCLKernel->getAttr<SYCLIntelMaxWorkGroupSizeAttr>()) {
-      if (S.checkMaxAllowedWorkGroupSize(
-              RWGSA->getXDim(), RWGSA->getYDim(), RWGSA->getZDim(),
-              Existing->getXDim(), Existing->getYDim(), Existing->getZDim())) {
-        S.Diag(SYCLKernel->getLocation(),
-               diag::err_conflicting_sycl_kernel_attributes);
-        S.Diag(Existing->getLocation(), diag::note_conflicting_attribute);
-        S.Diag(RWGSA->getLocation(), diag::note_conflicting_attribute);
-        SYCLKernel->setInvalidDecl();
-      } else {
-        SYCLKernel->addAttr(A);
-      }
     } else {
       SYCLKernel->addAttr(A);
     }
@@ -5781,25 +5754,6 @@ static void PropagateAndDiagnoseDeviceAttr(SemaSYCL &S, Attr *A,
     SYCLKernel->addAttr(A);
     break;
   }
-  case attr::Kind::SYCLIntelMaxWorkGroupSize: {
-    auto *SIMWGSA = cast<SYCLIntelMaxWorkGroupSizeAttr>(A);
-    if (auto *Existing = SYCLKernel->getAttr<SYCLReqdWorkGroupSizeAttr>()) {
-      if (S.checkMaxAllowedWorkGroupSize(
-              Existing->getXDim(), Existing->getYDim(), Existing->getZDim(),
-              SIMWGSA->getXDim(), SIMWGSA->getYDim(), SIMWGSA->getZDim())) {
-        S.Diag(SYCLKernel->getLocation(),
-               diag::err_conflicting_sycl_kernel_attributes);
-        S.Diag(Existing->getLocation(), diag::note_conflicting_attribute);
-        S.Diag(SIMWGSA->getLocation(), diag::note_conflicting_attribute);
-        SYCLKernel->setInvalidDecl();
-      } else {
-        SYCLKernel->addAttr(A);
-      }
-    } else {
-      SYCLKernel->addAttr(A);
-    }
-    break;
-  }
   case attr::Kind::SYCLSimd:
     if (KernelBody && !KernelBody->getAttr<SYCLSimdAttr>()) {
       // Usual kernel can't call ESIMD functions.
@@ -5812,17 +5766,8 @@ static void PropagateAndDiagnoseDeviceAttr(SemaSYCL &S, Attr *A,
     }
     LLVM_FALLTHROUGH;
   case attr::Kind::SYCLIntelKernelArgsRestrict:
-  case attr::Kind::SYCLIntelNumSimdWorkItems:
-  case attr::Kind::SYCLIntelSchedulerTargetFmaxMhz:
-  case attr::Kind::SYCLIntelMaxGlobalWorkDim:
   case attr::Kind::SYCLIntelMinWorkGroupsPerComputeUnit:
   case attr::Kind::SYCLIntelMaxWorkGroupsPerMultiprocessor:
-  case attr::Kind::SYCLIntelNoGlobalWorkOffset:
-  case attr::Kind::SYCLIntelLoopFuse:
-  case attr::Kind::SYCLIntelMaxConcurrency:
-  case attr::Kind::SYCLIntelDisableLoopPipelining:
-  case attr::Kind::SYCLIntelInitiationInterval:
-  case attr::Kind::SYCLIntelUseStallEnableClusters:
   case attr::Kind::SYCLDeviceHas:
   case attr::Kind::SYCLAddIRAttributesFunction:
     SYCLKernel->addAttr(A);
@@ -5959,8 +5904,8 @@ Sema::SemaDiagnosticBuilder
 SemaSYCL::DiagIfDeviceCode(SourceLocation Loc, unsigned DiagID,
                            DeviceDiagnosticReason Reason) {
   assert(getLangOpts().SYCLIsDevice &&
-         "Should only be called during SYCL compilation");
-  FunctionDecl *FD = dyn_cast<FunctionDecl>(SemaRef.getCurLexicalContext());
+         "Device diagnostics Should only be issued during device compilation");
+  FunctionDecl *FD = SemaRef.getCurFunctionDecl(/*AllowLambda=*/true);
   SemaDiagnosticBuilder::Kind DiagKind = [this, FD, Reason] {
     if (DiagnosingSYCLKernel)
       return SemaDiagnosticBuilder::K_ImmediateWithCallStack;
@@ -6093,7 +6038,8 @@ void SemaSYCL::finalizeSYCLDelayedAnalysis(const FunctionDecl *Caller,
     return;
 
   // If Callee has a SYCL attribute, no diagnostic needed.
-  if (Callee->hasAttr<SYCLDeviceAttr>() || Callee->hasAttr<DeviceKernelAttr>())
+  if (Callee->hasAttr<SYCLDeviceAttr>() || Callee->hasAttr<SYCLKernelAttr>() ||
+      Callee->hasAttr<SYCLExternalAttr>())
     return;
 
   // If Callee has a CUDA device attribute, no diagnostic needed.
@@ -6149,6 +6095,7 @@ static const char *paramKind2Str(KernelParamKind K) {
     CASE(work_group_memory);
     CASE(dynamic_work_group_memory);
     CASE(dynamic_accessor);
+    CASE(struct_with_special_type);
   }
   return "<ERROR>";
 
@@ -6626,6 +6573,437 @@ static void PrintNSClosingBraces(raw_ostream &OS, const DeclContext *DC) {
       [](raw_ostream &, const NamespaceDecl *) {}, OS, DC);
 }
 
+/// Dedicated visitor which helps with printing of kernel arguments in forward
+/// declarations of free function kernels which are declared as function
+/// templates.
+///
+/// Based on:
+/// \code
+/// template <typename T1, typename T2>
+/// void foo(T1 a, int b, T2 c);
+/// \endcode
+///
+/// It prints into the output stream "T1, int, T2".
+///
+/// The main complexity (which motivates addition of such visitor) comes from
+/// the fact that there could be type aliases and default template arguments.
+/// For example:
+/// \code
+/// template<typename T>
+/// void kernel(sycl::accessor<T, 1>);
+/// template void kernel(sycl::accessor<int, 1>);
+/// \endcode
+/// sycl::accessor has many template arguments which have default values. If
+/// we iterate over non-canonicalized argument type, we don't get those default
+/// values and we don't get necessary namespace qualifiers for all the template
+/// arguments. If we iterate over canonicalized argument type, then all
+/// references to T will be replaced with something like type-argument-X-Y.
+/// What this visitor does is it iterates over both in sync, picking the right
+/// values from one or another.
+///
+/// The template argument visitor functions take an additional
+/// ArrayRef<TemplateArgument> argument corresponding to the template arguments
+/// of the outermost template. This is used by some of these functions for
+/// mapping dependent template arguments.
+///
+/// Moral of the story: drop integration header ASAP (but that is blocked
+/// by support for 3rd-party host compilers, which is important).
+static std::string stringifyTypeWithEnumValues(QualType T,
+                                               PrintingPolicy &Policy,
+                                               ASTContext &Ctx);
+
+class FreeFunctionTemplateKernelArgsPrinter
+    : public ConstTemplateArgumentVisitor<FreeFunctionTemplateKernelArgsPrinter,
+                                          void, ArrayRef<TemplateArgument>> {
+  raw_ostream &O;
+  PrintingPolicy &Policy;
+  ASTContext &Context;
+
+  using Base =
+      ConstTemplateArgumentVisitor<FreeFunctionTemplateKernelArgsPrinter, void,
+                                   ArrayRef<TemplateArgument>>;
+
+  // Desugars a template argument. This helps avoid aliases.
+  static TemplateArgument DesugarTemplateArgument(const TemplateArgument &Arg) {
+    switch (Arg.getKind()) {
+    case TemplateArgument::ArgKind::Type: {
+      QualType ArgTy = Arg.getAsType();
+      return {QualType(ArgTy->getUnqualifiedDesugaredType(),
+                       ArgTy.getCVRQualifiers())};
+    }
+    case TemplateArgument::ArgKind::Template: {
+      TemplateName TN = Arg.getAsTemplate();
+      while (std::optional<TemplateName> DesugaredTN =
+                 TN.desugar(/*IgnoreDeduced=*/false))
+        TN = *DesugaredTN;
+      return {TN};
+    }
+    default:
+      return Arg;
+    }
+  }
+
+  void PrintDesugared(const TemplateArgument &Arg) {
+    DesugarTemplateArgument(Arg).print(Policy, O, /*IncludeType=*/false);
+  }
+
+  void printEnumValue(QualType EnumTy, const llvm::APSInt &Val) {
+    O << "static_cast<";
+    if (const auto *ET = EnumTy->getAs<EnumType>())
+      ET->getOriginalDecl()->printQualifiedName(O, Policy,
+                                                /*WithGlobalNsPrefix=*/false);
+    else
+      EnumTy.print(O, Policy);
+    llvm::SmallString<8> Num;
+    Val.toString(Num, /*Radix=*/10, /*Signed=*/Val.isSigned());
+    O << ">(" << Num << ")";
+  }
+
+public:
+  FreeFunctionTemplateKernelArgsPrinter(raw_ostream &O, PrintingPolicy &Policy,
+                                        ASTContext &Context)
+      : O(O), Policy(Policy), Context(Context) {}
+
+  void Visit(const ParmVarDecl *Param) {
+    // There are cases when we can't directly use neither the original
+    // argument type, nor its canonical version. An example would be:
+    // template<typename T>
+    // void kernel(sycl::accessor<T, 1>);
+    // template void kernel(sycl::accessor<int, 1>);
+    // Accessor has multiple non-type template arguments with default values
+    // and non-qualified type will not include necessary namespaces for all
+    // of them. Qualified type will have that information, but all references
+    // to T will be replaced to something like type-argument-0
+    // What we do instead is we iterate template arguments of both versions
+    // of a type in sync and take elements from one or another to get the best
+    // of both: proper references to template arguments of a kernel itself and
+    // fully-qualified names for enumerations.
+    //
+    // Moral of the story: drop integration header ASAP (but that is blocked
+    // by support for 3rd-party host compilers, which is important).
+    QualType T = Param->getType();
+    QualType CT = T.getCanonicalType();
+
+    const auto *TST = dyn_cast<TemplateSpecializationType>(T.getTypePtr());
+    const auto *CTST = dyn_cast<TemplateSpecializationType>(CT.getTypePtr());
+    if (!TST || !CTST) {
+      O << stringifyTypeWithEnumValues(T.getDesugaredType(Context), Policy,
+                                       Context);
+      return;
+    }
+
+    const TemplateSpecializationType *TSTAsNonAlias =
+        TST->getAsNonAliasTemplateSpecializationType();
+    if (TSTAsNonAlias)
+      TST = TSTAsNonAlias;
+
+    ArrayRef<TemplateArgument> SpecArgs = TST->template_arguments();
+    ArrayRef<TemplateArgument> DeclArgs = CTST->template_arguments();
+
+    const TemplateDecl *TD = CTST->getTemplateName().getAsTemplateDecl();
+    if (!TD->getIdentifier())
+      TD = TST->getTemplateName().getAsTemplateDecl();
+    assert(TD->getIdentifier() &&
+           "Either the type or the canonical type should have an identifier.");
+    T.getLocalQualifiers().print(O, Policy, /*appendSpaceIfNotEmpty=*/true);
+    TD->printQualifiedName(O);
+
+    O << "<";
+    for (size_t I = 0, E = std::max(DeclArgs.size(), SpecArgs.size()),
+                SE = SpecArgs.size();
+         I < E; ++I) {
+      if (I != 0)
+        O << ", ";
+      // If we have a specialized argument, use it. Otherwise fallback to a
+      // default argument.
+      // We pass specialized arguments in case there are references to them
+      // from other types.
+      // FIXME: passing SpecArgs here is incorrect. It refers to template
+      // arguments of a single function argument, but DeclArgs contain
+      // references (in form of depth-index) to template arguments of the
+      // function itself which results in incorrect integration header being
+      // produced.
+      Base::Visit(I < SE ? SpecArgs[I] : DeclArgs[I], SpecArgs);
+    }
+    O << ">";
+  }
+
+  // Internal version of the function above that is used when template argument
+  // is a template by itself
+  void Visit(const TemplateSpecializationType *T,
+             ArrayRef<TemplateArgument> SpecArgs) {
+    const TemplateDecl *TD = T->getTemplateName().getAsTemplateDecl();
+    const auto *TTPD = dyn_cast<TemplateTemplateParmDecl>(TD);
+    if (TTPD && !TTPD->getIdentifier())
+      PrintDesugared(SpecArgs[TTPD->getIndex()]);
+    else
+      TD->printQualifiedName(O);
+    O << "<";
+    ArrayRef<const TemplateArgument> DeclArgs = T->template_arguments();
+    for (size_t I = 0, E = DeclArgs.size(); I < E; ++I) {
+      if (I != 0)
+        O << ", ";
+      Base::Visit(DeclArgs[I], SpecArgs);
+    }
+    O << ">";
+  }
+
+  void VisitNullTemplateArgument(const TemplateArgument &,
+                                 ArrayRef<TemplateArgument>) {
+    llvm_unreachable("If template argument has not been deduced, then we can't "
+                     "forward-declare it, something went wrong");
+  }
+
+  void VisitTypeTemplateArgument(const TemplateArgument &Arg,
+                                 ArrayRef<TemplateArgument> SpecArgs) {
+    TemplateArgument DesugaredArg = DesugarTemplateArgument(Arg);
+    // If we reference an existing template argument without a known identifier,
+    // print it instead.
+    const auto *TPT = dyn_cast<TemplateTypeParmType>(DesugaredArg.getAsType());
+    if (TPT && !TPT->getIdentifier()) {
+      PrintDesugared(SpecArgs[TPT->getIndex()]);
+      return;
+    }
+
+    const auto *TST =
+        dyn_cast<TemplateSpecializationType>(DesugaredArg.getAsType());
+    if (TST && Arg.isInstantiationDependent()) {
+      // This is an instantiation dependent template specialization, meaning
+      // that some of its arguments reference template arguments of the free
+      // function kernel itself.
+      Visit(TST, SpecArgs);
+      return;
+    }
+
+    DesugaredArg.print(Policy, O, /* IncludeType = */ false);
+  }
+
+  void VisitDeclarationTemplateArgument(const TemplateArgument &,
+                                        ArrayRef<TemplateArgument>) {
+    llvm_unreachable("Free function kernels cannot have non-type template "
+                     "arguments which are pointers or references");
+  }
+
+  void VisitNullPtrTemplateArgument(const TemplateArgument &,
+                                    ArrayRef<TemplateArgument>) {
+    llvm_unreachable("Free function kernels cannot have non-type template "
+                     "arguments which are pointers or references");
+  }
+
+  void VisitIntegralTemplateArgument(const TemplateArgument &Arg,
+                                     ArrayRef<TemplateArgument>) {
+    QualType T = Arg.getIntegralType();
+    if (T->isEnumeralType())
+      return printEnumValue(T, Arg.getAsIntegral());
+    PrintDesugared(Arg);
+  }
+
+  void VisitStructuralValueTemplateArgument(const TemplateArgument &Arg,
+                                            ArrayRef<TemplateArgument>) {
+    QualType T = Arg.getIntegralType();
+    if (T->isEnumeralType())
+      return printEnumValue(T, Arg.getAsIntegral());
+    PrintDesugared(Arg);
+  }
+
+  void VisitTemplateTemplateArgument(const TemplateArgument &Arg,
+                                     ArrayRef<TemplateArgument>) {
+    PrintDesugared(Arg);
+  }
+
+  void VisitTemplateExpansionTemplateArgument(const TemplateArgument &Arg,
+                                              ArrayRef<TemplateArgument>) {
+    PrintDesugared(Arg);
+  }
+
+  void VisitExpressionTemplateArgument(const TemplateArgument &Arg,
+                                       ArrayRef<TemplateArgument>) {
+    Expr *E = Arg.getAsExpr();
+    assert(E && "Failed to get an Expr for an Expression template arg?");
+
+    if (Arg.isInstantiationDependent()) {
+      PrintDesugared(Arg);
+      return;
+    }
+
+    if (E->getType()->isEnumeralType()) {
+      Expr::EvalResult Res;
+      if (E->EvaluateAsConstantExpr(Res, Context) && !Res.Val.isAbsent() &&
+          Res.Val.isInt())
+        return printEnumValue(E->getType(), Res.Val.getInt());
+    }
+
+    Expr::EvalResult Res;
+    [[maybe_unused]] bool Success = E->EvaluateAsConstantExpr(Res, Context);
+    assert(Success && "invalid non-type template argument?");
+    assert(!Res.Val.isAbsent() && "couldn't read the evaulation result?");
+    Res.Val.printPretty(O, Policy, E->getType(), &Context);
+  }
+
+  void VisitPackTemplateArgument(const TemplateArgument &Arg,
+                                 ArrayRef<TemplateArgument>) {
+    PrintDesugared(Arg);
+  }
+};
+
+class EnumValueTemplateArgPrinter
+    : public ConstTemplateArgumentVisitor<EnumValueTemplateArgPrinter> {
+  raw_ostream &OS;
+  PrintingPolicy &Policy;
+  ASTContext &Ctx;
+
+  void printEnumValue(QualType EnumTy, const llvm::APSInt &Val) {
+    OS << "static_cast<";
+    if (const auto *ET = EnumTy->getAs<EnumType>())
+      ET->getOriginalDecl()->printQualifiedName(OS, Policy,
+                                                /*WithGlobalNsPrefix=*/false);
+    else
+      EnumTy.print(OS, Policy);
+    llvm::SmallString<8> Num;
+    Val.toString(Num, /*Radix=*/10, /*Signed=*/Val.isSigned());
+    OS << ">(" << Num << ")";
+  }
+
+  void printTemplateArgs(ArrayRef<TemplateArgument> Args) {
+    llvm::ListSeparator LS(", ");
+    for (const auto &A : Args) {
+      // Skip empty packs without emitting separators.
+      if (A.getKind() == TemplateArgument::ArgKind::Pack && !A.pack_size())
+        continue;
+      OS << LS;
+      Visit(A);
+    }
+  }
+
+  void printTypeWithEnumValues(QualType T) {
+    QualType DT = T.getDesugaredType(Ctx);
+
+    if (const auto *CTSD = dyn_cast_or_null<ClassTemplateSpecializationDecl>(
+            DT->getAsCXXRecordDecl())) {
+      T.getLocalQualifiers().print(OS, Policy, /*appendSpaceIfNotEmpty=*/true);
+      if (!Policy.SuppressTagKeyword)
+        OS << CTSD->getKindName() << " ";
+      CTSD->printQualifiedName(OS, Policy,
+                               /*WithGlobalNsPrefix=*/false);
+      OS << "<";
+      printTemplateArgs(CTSD->getTemplateArgs().asArray());
+      OS << ">";
+      return;
+    }
+
+    if (const auto *TST = DT->getAs<TemplateSpecializationType>()) {
+      T.getLocalQualifiers().print(OS, Policy, /*appendSpaceIfNotEmpty=*/true);
+      if (const auto *RT = TST->getAs<RecordType>()) {
+        if (!Policy.SuppressTagKeyword)
+          OS << RT->getDecl()->getKindName() << " ";
+      }
+
+      if (TemplateDecl *TD = TST->getTemplateName().getAsTemplateDecl())
+        TD->printQualifiedName(OS, Policy,
+                               /*WithGlobalNsPrefix=*/false);
+      else
+        TST->getTemplateName().print(OS, Policy);
+
+      OS << "<";
+      printTemplateArgs(TST->template_arguments());
+      OS << ">";
+      return;
+    }
+
+    T.print(OS, Policy);
+  }
+
+public:
+  EnumValueTemplateArgPrinter(raw_ostream &OS, PrintingPolicy &Policy,
+                              ASTContext &Ctx)
+      : OS(OS), Policy(Policy), Ctx(Ctx) {}
+
+  void PrintType(QualType T) { printTypeWithEnumValues(T); }
+
+  void Visit(const TemplateArgument &TA) {
+    if (TA.isNull())
+      return;
+    ConstTemplateArgumentVisitor::Visit(TA);
+  }
+
+  void VisitTypeTemplateArgument(const TemplateArgument &Arg) {
+    printTypeWithEnumValues(Arg.getAsType());
+  }
+
+  void VisitIntegralTemplateArgument(const TemplateArgument &Arg) {
+    QualType T = Arg.getIntegralType();
+    if (T->isEnumeralType())
+      return printEnumValue(T, Arg.getAsIntegral());
+    Arg.print(Policy, OS, /*IncludeType=*/false);
+  }
+
+  void VisitExpressionTemplateArgument(const TemplateArgument &Arg) {
+    Expr *E = Arg.getAsExpr();
+    if (!E || Arg.isInstantiationDependent()) {
+      Arg.print(Policy, OS, /*IncludeType=*/false);
+      return;
+    }
+
+    if (E->getType()->isEnumeralType()) {
+      Expr::EvalResult Res;
+      if (E->EvaluateAsConstantExpr(Res, Ctx) && !Res.Val.isAbsent() &&
+          Res.Val.isInt()) {
+        return printEnumValue(E->getType(), Res.Val.getInt());
+      }
+    }
+
+    E = E->IgnoreParenImpCasts();
+    const EnumConstantDecl *ECD = nullptr;
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(E))
+      ECD = dyn_cast<EnumConstantDecl>(DRE->getDecl());
+    else if (const auto *ME = dyn_cast<MemberExpr>(E))
+      ECD = dyn_cast<EnumConstantDecl>(ME->getMemberDecl());
+
+    if (ECD)
+      return printEnumValue(ECD->getType(), ECD->getInitVal());
+
+    Arg.print(Policy, OS, /*IncludeType=*/false);
+  }
+
+  void VisitTemplateTemplateArgument(const TemplateArgument &Arg) {
+    Arg.getAsTemplate().print(OS, Policy);
+  }
+
+  void VisitTemplateExpansionTemplateArgument(const TemplateArgument &Arg) {
+    Arg.print(Policy, OS, /*IncludeType=*/false);
+  }
+
+  void VisitStructuralValueTemplateArgument(const TemplateArgument &Arg) {
+    Arg.print(Policy, OS, /*IncludeType=*/false);
+  }
+
+  void VisitPackTemplateArgument(const TemplateArgument &Arg) {
+    printTemplateArgs(Arg.getPackAsArray());
+  }
+};
+
+static std::string
+stringifyTemplateArgWithEnumValues(const TemplateArgument &Arg,
+                                   PrintingPolicy &Policy, ASTContext &Ctx) {
+  std::string Out;
+  llvm::raw_string_ostream OS(Out);
+  EnumValueTemplateArgPrinter Printer(OS, Policy, Ctx);
+  Printer.Visit(Arg);
+  OS.flush();
+  return Out;
+}
+
+static std::string stringifyTypeWithEnumValues(QualType T,
+                                               PrintingPolicy &Policy,
+                                               ASTContext &Ctx) {
+  std::string Out;
+  llvm::raw_string_ostream OS(Out);
+  EnumValueTemplateArgPrinter Printer(OS, Policy, Ctx);
+  Printer.PrintType(T);
+  OS.flush();
+  return Out;
+}
+
 class FreeFunctionPrinter {
   raw_ostream &O;
   PrintingPolicy &Policy;
@@ -6758,13 +7136,14 @@ private:
       else if (X.getKind() == TemplateArgument::Pack) {
         for (const auto &PackArg : X.pack_elements()) {
           StringStream << ", ";
-          PackArg.print(Policy, StringStream, /*IncludeType*/ true);
+          StringStream << stringifyTemplateArgWithEnumValues(PackArg, Policy,
+                                                             Context);
         }
         continue;
       } else
         StringStream << ", ";
 
-      X.print(Policy, StringStream, /*IncludeType*/ true);
+      StringStream << stringifyTemplateArgWithEnumValues(X, Policy, Context);
     }
     StringStream.flush();
     if (Buffer.front() != '<')
@@ -6789,81 +7168,16 @@ private:
     llvm::raw_svector_ostream ParmListOstream{ParamList};
     Policy.SuppressTagKeyword = true;
 
-    for (ParmVarDecl *Param : Parameters) {
+    FreeFunctionTemplateKernelArgsPrinter Printer(ParmListOstream, Policy,
+                                                  Context);
+
+    for (const ParmVarDecl *Param : Parameters) {
       if (FirstParam)
         FirstParam = false;
       else
         ParmListOstream << ", ";
 
-      // There are cases when we can't directly use neither the original
-      // argument type, nor its canonical version. An example would be:
-      // template<typename T>
-      // void kernel(sycl::accessor<T, 1>);
-      // template void kernel(sycl::accessor<int, 1>);
-      // Accessor has multiple non-type template arguments with default values
-      // and non-qualified type will not include necessary namespaces for all
-      // of them. Qualified type will have that information, but all references
-      // to T will be replaced to something like type-argument-0
-      // What we do instead is we iterate template arguments of both versions
-      // of a type in sync and take elements from one or another to get the best
-      // of both: proper references to template arguments of a kernel itself and
-      // fully-qualified names for enumerations.
-      //
-      // Moral of the story: drop integration header ASAP (but that is blocked
-      // by support for 3rd-party host compilers, which is important).
-      QualType T = Param->getType();
-      QualType CT = T.getCanonicalType();
-
-      auto *TST = dyn_cast<TemplateSpecializationType>(T.getTypePtr());
-      auto *CTST = dyn_cast<TemplateSpecializationType>(CT.getTypePtr());
-      if (!TST || !CTST) {
-        ParmListOstream << T.getAsString(Policy);
-        continue;
-      }
-
-      TemplateName CTN = CTST->getTemplateName();
-      CTN.getAsTemplateDecl()->printQualifiedName(ParmListOstream);
-      ParmListOstream << "<";
-
-      ArrayRef<TemplateArgument> SpecArgs = TST->template_arguments();
-      ArrayRef<TemplateArgument> DeclArgs = CTST->template_arguments();
-
-      auto TemplateArgPrinter = [&](const TemplateArgument &Arg) {
-        if (Arg.getKind() != TemplateArgument::ArgKind::Expression ||
-            Arg.isInstantiationDependent()) {
-          Arg.print(Policy, ParmListOstream, /* IncludeType = */ false);
-          return;
-        }
-
-        Expr *E = Arg.getAsExpr();
-        assert(E && "Failed to get an Expr for an Expression template arg?");
-        if (E->getType().getTypePtr()->isScopedEnumeralType()) {
-          // Scoped enumerations can't be implicitly cast from integers, so
-          // we don't need to evaluate them.
-          Arg.print(Policy, ParmListOstream, /* IncludeType = */ false);
-          return;
-        }
-
-        Expr::EvalResult Res;
-        [[maybe_unused]] bool Success =
-            Arg.getAsExpr()->EvaluateAsConstantExpr(Res, Context);
-        assert(Success && "invalid non-type template argument?");
-        assert(!Res.Val.isAbsent() && "couldn't read the evaulation result?");
-        Res.Val.printPretty(ParmListOstream, Policy, Arg.getAsExpr()->getType(),
-                            &Context);
-      };
-
-      for (size_t I = 0, E = std::max(DeclArgs.size(), SpecArgs.size()),
-                  SE = SpecArgs.size();
-           I < E; ++I) {
-        if (I != 0)
-          ParmListOstream << ", ";
-        // If we have a specialized argument, use it. Otherwise fallback to a
-        // default argument.
-        TemplateArgPrinter(I < SE ? SpecArgs[I] : DeclArgs[I]);
-      }
-
-      ParmListOstream << ">";
+      Printer.Visit(Param);
     }
     return ParamList.str().str();
   }
@@ -6881,25 +7195,38 @@ private:
   std::string getTemplateParameters(const clang::TemplateParameterList *TPL) {
     std::string TemplateParams{"template <"};
     bool FirstParam{true};
-    for (NamedDecl *Param : *TPL) {
+    for (const NamedDecl *Param : *TPL) {
       if (!FirstParam)
         TemplateParams += ", ";
       FirstParam = false;
-      if (const auto *TemplateParam = dyn_cast<TemplateTypeParmDecl>(Param)) {
-        TemplateParams +=
-            TemplateParam->wasDeclaredWithTypename() ? "typename " : "class ";
-        if (TemplateParam->isParameterPack())
-          TemplateParams += "... ";
-        TemplateParams += TemplateParam->getNameAsString();
-      } else if (const auto *NonTypeParam =
-                     dyn_cast<NonTypeTemplateParmDecl>(Param)) {
-        TemplateParams += NonTypeParam->getType().getAsString();
-        TemplateParams += " ";
-        TemplateParams += NonTypeParam->getNameAsString();
-      }
+      TemplateParams += getTemplateParameter(Param);
     }
     TemplateParams += "> ";
     return TemplateParams;
+  }
+
+  /// Helper method to get text representation of a template parameter.
+  /// \param Param The template parameter.
+  std::string getTemplateParameter(const NamedDecl *Param) {
+    auto GetTypenameOrClass = [](const auto *Param) {
+      return Param->wasDeclaredWithTypename() ? "typename " : "class ";
+    };
+    if (const auto *TemplateParam = dyn_cast<TemplateTypeParmDecl>(Param)) {
+      std::string TemplateParamStr = GetTypenameOrClass(TemplateParam);
+      if (TemplateParam->isParameterPack())
+        TemplateParamStr += "... ";
+      TemplateParamStr += TemplateParam->getNameAsString();
+      return TemplateParamStr;
+    } else if (const auto *NonTypeParam =
+                   dyn_cast<NonTypeTemplateParmDecl>(Param)) {
+      return NonTypeParam->getType().getAsString() + " " +
+             NonTypeParam->getNameAsString();
+    } else if (const auto *TTParam =
+                   dyn_cast<TemplateTemplateParmDecl>(Param)) {
+      return getTemplateParameters(TTParam->getTemplateParameters()) + " " +
+             GetTypenameOrClass(TTParam) + TTParam->getNameAsString();
+    }
+    return "";
   }
 };
 
@@ -6920,7 +7247,8 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
   // Disable printing anonymous tag locations because on Windows
   // file path separators are treated as escape sequences and cause errors
   // when integration header is compiled with host compiler.
-  Policy.AnonymousTagLocations = 0;
+  Policy.AnonymousTagNameStyle =
+            llvm::to_underlying(PrintingPolicy::AnonymousTagMode::Plain);
   SYCLFwdDeclEmitter FwdDeclEmitter(O, S.getLangOpts());
 
   // Predefines which need to be set for custom host compilation
@@ -7056,7 +7384,11 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
   for (unsigned I = 0; I < KernelDescs.size(); I++) {
     O << KernelDescs[I].Params.size() << ", ";
   }
+  // Add a sentinel to avoid warning if the collection is empty
+  // (similar to what we do for kernel_signatures below).
+  O << std::numeric_limits<uint32_t>::max() << ", \n";
   O << "};\n\n";
+
   O << "// array representing signatures of all kernels defined in the\n";
   O << "// corresponding source\n";
   O << "static constexpr\n";
@@ -7185,6 +7517,10 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
 
   unsigned ShimCounter = 1;
   int FreeFunctionCount = 0;
+  // Structs with special types inside need some special code generation in the
+  // header and we keep this visited map to not have duplicates in case several
+  // free function kernels use the same struct type as parameters.
+  llvm::DenseMap<const RecordDecl *, bool> visitedStructWithSpecialType;
   for (const KernelDesc &K : KernelDescs) {
     if (!S.isFreeFunction(K.SyclKernel))
       continue;
@@ -7197,6 +7533,11 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
     Policy.SuppressDefaultTemplateArgs = false;
     FwdDeclEmitter.Visit(K.SyclKernel->getType());
     O << "\n";
+    // Forward declare template arguments as well.
+    if (const TemplateArgumentList *TAL =
+            K.SyclKernel->getTemplateSpecializationArgs())
+      for (const TemplateArgument &TA : TAL->asArray())
+        FwdDeclEmitter.Visit(TA);
 
     if (K.SyclKernel->getLanguageLinkage() == CLanguageLinkage)
       O << "extern \"C\" ";
@@ -7218,12 +7559,15 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
         ParmList += "Args ...";
       } else {
         Policy.SuppressTagKeyword = true;
-        Param->getType().print(ParmListWithNamesOstream, Policy);
+        ParmListWithNamesOstream << stringifyTypeWithEnumValues(
+            Param->getType(), Policy, S.getASTContext());
         Policy.SuppressTagKeyword = false;
         ParmListWithNamesOstream << " " << Param->getNameAsString();
-        ParmList += Param->getType().getCanonicalType().getAsString(Policy);
+        ParmList += stringifyTypeWithEnumValues(
+            Param->getType().getCanonicalType(), Policy, S.getASTContext());
       }
     }
+
     ParmListWithNamesOstream.flush();
     FunctionTemplateDecl *FTD = K.SyclKernel->getPrimaryTemplate();
     Policy.PrintAsCanonical = false;
@@ -7270,6 +7614,67 @@ void SYCLIntegrationHeader::emit(raw_ostream &O) {
       FFPrinter.printFreeFunctionDeclaration(K.SyclKernel, ParmListWithNames);
     }
 
+    // Now we handle all structs that contain special types
+    // inside. Their information is contained in StructsWithSpecialTypes of
+    // SemaSYCL.
+    for (ParmVarDecl *Param : K.SyclKernel->parameters()) {
+      if (!Param->getType()->isStructureType())
+        continue;
+      const RecordDecl *Struct = Param->getType()->getAsRecordDecl();
+      QualType type = Param->getType();
+      if (!S.getStructsWithSpecialType().count(Struct) ||
+          visitedStructWithSpecialType.count(Struct))
+        continue;
+
+      FwdDeclEmitter.Visit(type.getDesugaredType(S.getASTContext()));
+
+      // this is a struct that contains a special type so it's neither a
+      // special type nor a trivially copyable type. We therefore need to
+      // explicitly communicate to the runtime that this argument should be
+      // allowed as a free function kernel argument. We do this by defining
+      // is_struct_with_special_type to be true. This helper struct also
+      // contains information about the offset, size and parameter
+      // kind of every field inside the struct at any nesting level
+      // This facilitates setting the arguments in the runtime.
+      // We also define is_device_copyable trait to be true for this type to
+      // allow it being passed in device kernels.
+      O << "template <>\n";
+      O << "struct "
+           "sycl::is_device_copyable<";
+      Policy.SuppressTagKeyword = true;
+      type.print(O, Policy);
+      O << ">: std::true_type {};\n";
+
+      O << "template <>\n";
+      O << "struct "
+           "sycl::ext::oneapi::experimental::detail::is_struct_with_special_"
+           "type<";
+      Policy.SuppressTagKeyword = true;
+      type.print(O, Policy);
+      O << "> {\n";
+      O << " inline static constexpr bool value = true;\n";
+      O << " static constexpr int offsets[] = { ";
+      for (const auto OffsetSize : OffsetSizeInfo[Param]) {
+        O << OffsetSize.first << ", ";
+      }
+      O << "-1};\n ";
+
+      O << " static constexpr int sizes[] = { ";
+      for (const auto OffsetSize : OffsetSizeInfo[Param]) {
+        O << OffsetSize.second << ", ";
+      }
+      O << "-1}; \n ";
+
+      O << " static constexpr sycl::detail::kernel_param_kind_t kinds[] = {\n ";
+      for (const auto Kind : KindInfo[Param]) {
+        O << " sycl::detail::kernel_param_kind_t::" << paramKind2Str(Kind);
+        O << ",\n ";
+      }
+      O << "sycl::detail::kernel_param_kind_t::kind_invalid }; \n};\n\n ";
+
+      visitedStructWithSpecialType[Struct] = true;
+    }
+    Policy.SuppressTagKeyword = false;
     FFPrinter.printFreeFunctionShim(K.SyclKernel, ShimCounter, ParmList);
     O << ";\n";
     O << "}\n";
@@ -7363,6 +7768,21 @@ void SYCLIntegrationHeader::addParamDesc(kernel_param_kind_t Kind, int Info,
   PD.Kind = Kind;
   PD.Info = Info;
   PD.Offset = Offset;
+  // If we are adding a free function kernel parameter that is a struct that
+  // contains a special type, a little more work needs to be done in order to
+  // help the runtime set the kernel arguments properly. Add the offset, size,
+  // and Kind information to the integration header for each field inside this
+  // struct. Also, verify that we are actually adding a field and not the struct
+  // itself by checking the Kind.
+  if (ParentStruct &&
+      Kind != kernel_param_kind_t::kind_struct_with_special_type) {
+    OffsetSizeInfo[ParentStruct].emplace_back(std::make_pair(Offset, Info));
+    KindInfo[ParentStruct].emplace_back(Kind);
+  }
+}
+
+void SYCLIntegrationHeader::setParentStruct(ParmVarDecl *parent) {
+  ParentStruct = parent;
 }
 
 void SYCLIntegrationHeader::endKernel() {
@@ -7735,6 +8155,23 @@ void SemaSYCL::handleKernelEntryPointAttr(Decl *D, const ParsedAttr &AL) {
                  SYCLKernelEntryPointAttr(SemaRef.Context, AL, TSI));
 }
 
+void SemaSYCL::CheckDeviceUseOfDecl(NamedDecl *ND, SourceLocation Loc) {
+  assert(getLangOpts().SYCLIsDevice &&
+         "Should only be called during SYCL device compilation");
+
+  // Function declarations with the sycl_kernel_entry_point attribute cannot
+  // be ODR-used in a potentially evaluated context.
+  if (FunctionDecl *FD = dyn_cast<FunctionDecl>(ND)) {
+    if (const auto *SKEPAttr = FD->getAttr<SYCLKernelEntryPointAttr>()) {
+      if (SemaRef.currentEvaluationContext().isPotentiallyEvaluated()) {
+        DiagIfDeviceCode(Loc, diag::err_sycl_entry_point_device_use)
+            << FD << SKEPAttr;
+        DiagIfDeviceCode(SKEPAttr->getLocation(), diag::note_attribute) << FD;
+      }
+    }
+  }
+}
+
 // Given a potentially qualified type, SourceLocationForUserDeclaredType()
 // returns the source location of the canonical declaration of the unqualified
 // desugared user declared type, if any. For non-user declared types, an
@@ -7745,8 +8182,8 @@ static SourceLocation SourceLocationForUserDeclaredType(QualType QT) {
   SourceLocation Loc;
   const Type *T = QT->getUnqualifiedDesugaredType();
   if (const TagType *TT = dyn_cast<TagType>(T))
-    Loc = TT->getOriginalDecl()->getLocation();
-  else if (const ObjCInterfaceType *ObjCIT = dyn_cast<ObjCInterfaceType>(T))
+    Loc = TT->getDecl()->getLocation();
+  else if (const auto *ObjCIT = dyn_cast<ObjCInterfaceType>(T))
     Loc = ObjCIT->getDecl()->getLocation();
   return Loc;
 }
@@ -7839,43 +8276,53 @@ void SemaSYCL::CheckSYCLEntryPointFunctionDecl(FunctionDecl *FD) {
     }
   }
 
+  if (isa<CXXConstructorDecl>(FD)) {
+    Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
+        << SKEPAttr << diag::InvalidSKEPReason::Constructor;
+    SKEPAttr->setInvalidAttr();
+  }
+  if (isa<CXXDestructorDecl>(FD)) {
+    Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
+        << SKEPAttr << diag::InvalidSKEPReason::Destructor;
+    SKEPAttr->setInvalidAttr();
+  }
   if (const auto *MD = dyn_cast<CXXMethodDecl>(FD)) {
-    if (!MD->isStatic()) {
+    if (MD->isExplicitObjectMemberFunction()) {
       Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-          << SKEPAttr << /*non-static member function*/ 0;
+          << SKEPAttr << diag::InvalidSKEPReason::ExplicitObjectFn;
       SKEPAttr->setInvalidAttr();
     }
   }
 
   if (FD->isVariadic()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*variadic function*/ 1;
+        << SKEPAttr << diag::InvalidSKEPReason::VariadicFn;
     SKEPAttr->setInvalidAttr();
   }
 
   if (FD->isDefaulted()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*defaulted function*/ 3;
+        << SKEPAttr << diag::InvalidSKEPReason::DefaultedFn;
     SKEPAttr->setInvalidAttr();
   } else if (FD->isDeleted()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*deleted function*/ 2;
+        << SKEPAttr << diag::InvalidSKEPReason::DeletedFn;
     SKEPAttr->setInvalidAttr();
   }
 
   if (FD->isConsteval()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*consteval function*/ 5;
+        << SKEPAttr << diag::InvalidSKEPReason::ConstevalFn;
     SKEPAttr->setInvalidAttr();
   } else if (FD->isConstexpr()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*constexpr function*/ 4;
+        << SKEPAttr << diag::InvalidSKEPReason::ConstexprFn;
     SKEPAttr->setInvalidAttr();
   }
 
   if (FD->isNoReturn()) {
     Diag(SKEPAttr->getLocation(), diag::err_sycl_entry_point_invalid)
-        << SKEPAttr << /*function declared with the 'noreturn' attribute*/ 6;
+        << SKEPAttr << diag::InvalidSKEPReason::NoreturnFn;
     SKEPAttr->setInvalidAttr();
   }
 
@@ -7911,7 +8358,164 @@ void SemaSYCL::CheckSYCLEntryPointFunctionDecl(FunctionDecl *FD) {
   }
 }
 
+ExprResult SemaSYCL::BuildSYCLKernelLaunchIdExpr(FunctionDecl *FD,
+                                                 QualType KNT) {
+  // The current context must be the function definition context to ensure
+  // that name lookup is performed within the correct scope.
+  assert(SemaRef.CurContext == FD && "The current declaration context does not "
+                                     "match the requested function context");
+
+  // An appropriate source location is required to emit diagnostics if
+  // lookup fails to produce an overload set. The desired location is the
+  // start of the function body, but that is not yet available since the
+  // body of the function has not yet been set when this function is called.
+  // The general location of the function is used instead.
+  SourceLocation Loc = FD->getLocation();
+
+  ASTContext &Ctx = SemaRef.getASTContext();
+  IdentifierInfo &SYCLKernelLaunchID =
+      Ctx.Idents.get("sycl_kernel_launch", tok::TokenKind::identifier);
+
+  // Establish a code synthesis context for the implicit name lookup of
+  // a template named 'sycl_kernel_launch'. In the event of an error, this
+  // ensures an appropriate diagnostic note is issued to explain why the
+  // lookup was performed.
+  Sema::CodeSynthesisContext CSC;
+  CSC.Kind = Sema::CodeSynthesisContext::SYCLKernelLaunchLookup;
+  CSC.Entity = FD;
+  Sema::ScopedCodeSynthesisContext ScopedCSC(SemaRef, CSC);
+
+  // Perform ordinary name lookup for a function or variable template that
+  // accepts a single type template argument.
+  LookupResult Result(SemaRef, &SYCLKernelLaunchID, Loc,
+                      Sema::LookupOrdinaryName);
+  CXXScopeSpec EmptySS;
+  if (SemaRef.LookupTemplateName(Result, SemaRef.getCurScope(), EmptySS,
+                                 /*ObjectType*/ QualType(),
+                                 /*EnteringContext*/ false,
+                                 Sema::TemplateNameIsRequired))
+    return ExprError();
+  if (Result.isAmbiguous())
+    return ExprError();
+
+  TemplateArgumentListInfo TALI{Loc, Loc};
+  TemplateArgument KNTA = TemplateArgument(KNT);
+  TemplateArgumentLoc TAL =
+      SemaRef.getTrivialTemplateArgumentLoc(KNTA, QualType(), Loc);
+  TALI.addArgument(TAL);
+
+  ExprResult IdExpr;
+  if (SemaRef.isPotentialImplicitMemberAccess(EmptySS, Result,
+                                              /*IsAddressOfOperand*/ false)) {
+    // The lookup result allows for a possible implicit member access that
+    // would require an implicit or explicit 'this' argument.
+    IdExpr = SemaRef.BuildPossibleImplicitMemberExpr(
+        EmptySS, SourceLocation(), Result, &TALI, SemaRef.getCurScope());
+  } else {
+    IdExpr = SemaRef.BuildTemplateIdExpr(EmptySS, SourceLocation(), Result,
+                                         /*RequiresADL*/ true, &TALI);
+  }
+
+  // The resulting expression may be invalid if, for example, 'FD' is a
+  // non-static member function and sycl_kernel_launch lookup selects a
+  // member function (which would require a 'this' argument which is
+  // not available).
+  if (IdExpr.isInvalid())
+    return ExprError();
+
+  return IdExpr;
+}
+
 namespace {
+
+// Constructs the arguments to be passed for the SYCL kernel launch call.
+// The first argument is a string literal that contains the SYCL kernel
+// name. The remaining arguments are the parameters of 'FD' passed as
+// move-elligible xvalues. Returns true on error and false otherwise.
+bool BuildSYCLKernelLaunchCallArgs(Sema &SemaRef, FunctionDecl *FD,
+                                   const SYCLKernelInfo *SKI,
+                                   SmallVectorImpl<Expr *> &Args,
+                                   SourceLocation Loc) {
+  // The current context must be the function definition context to ensure
+  // that parameter references occur within the correct scope.
+  assert(SemaRef.CurContext == FD && "The current declaration context does not "
+                                     "match the requested function context");
+
+  // Prepare a string literal that contains the kernel name.
+  ASTContext &Ctx = SemaRef.getASTContext();
+  const std::string &KernelName = SKI->GetKernelName();
+  QualType KernelNameCharTy = Ctx.CharTy.withConst();
+  llvm::APInt KernelNameSize(Ctx.getTypeSize(Ctx.getSizeType()),
+                             KernelName.size() + 1);
+  QualType KernelNameArrayTy = Ctx.getConstantArrayType(
+      KernelNameCharTy, KernelNameSize, nullptr, ArraySizeModifier::Normal, 0);
+  Expr *KernelNameExpr =
+      StringLiteral::Create(Ctx, KernelName, StringLiteralKind::Ordinary,
+                            /*Pascal*/ false, KernelNameArrayTy, Loc);
+  Args.push_back(KernelNameExpr);
+
+  // Forward all parameters of 'FD' to the SYCL kernel launch function as if
+  // by std::move().
+  for (ParmVarDecl *PVD : FD->parameters()) {
+    QualType ParamType = PVD->getOriginalType().getNonReferenceType();
+    ExprResult E = SemaRef.BuildDeclRefExpr(PVD, ParamType, VK_LValue, Loc);
+    if (E.isInvalid())
+      return true;
+    if (!PVD->getType()->isLValueReferenceType())
+      E = ImplicitCastExpr::Create(SemaRef.Context, E.get()->getType(), CK_NoOp,
+                                   E.get(), nullptr, VK_XValue,
+                                   FPOptionsOverride());
+    if (E.isInvalid())
+      return true;
+    Args.push_back(E.get());
+  }
+
+  return false;
+}
+
+// Constructs the SYCL kernel launch call.
+StmtResult BuildSYCLKernelLaunchCallStmt(Sema &SemaRef, FunctionDecl *FD,
+                                         const SYCLKernelInfo *SKI,
+                                         Expr *IdExpr, SourceLocation Loc) {
+  SmallVector<Stmt *> Stmts;
+  // IdExpr may be null if name lookup failed.
+  if (IdExpr) {
+    llvm::SmallVector<Expr *, 12> Args;
+
+    // Establish a code synthesis context for construction of the arguments
+    // for the implicit call to 'sycl_kernel_launch'.
+    {
+      Sema::CodeSynthesisContext CSC;
+      CSC.Kind = Sema::CodeSynthesisContext::SYCLKernelLaunchLookup;
+      CSC.Entity = FD;
+      Sema::ScopedCodeSynthesisContext ScopedCSC(SemaRef, CSC);
+
+      if (BuildSYCLKernelLaunchCallArgs(SemaRef, FD, SKI, Args, Loc))
+        return StmtError();
+    }
+
+    // Establish a code synthesis context for the implicit call to
+    // 'sycl_kernel_launch'.
+    {
+      Sema::CodeSynthesisContext CSC;
+      CSC.Kind = Sema::CodeSynthesisContext::SYCLKernelLaunchOverloadResolution;
+      CSC.Entity = FD;
+      CSC.CallArgs = Args.data();
+      CSC.NumCallArgs = Args.size();
+      Sema::ScopedCodeSynthesisContext ScopedCSC(SemaRef, CSC);
+
+      ExprResult LaunchResult =
+          SemaRef.BuildCallExpr(SemaRef.getCurScope(), IdExpr, Loc, Args, Loc);
+      if (LaunchResult.isInvalid())
+        return StmtError();
+
+      Stmts.push_back(SemaRef.MaybeCreateExprWithCleanups(LaunchResult).get());
+    }
+  }
+
+  return CompoundStmt::Create(SemaRef.getASTContext(), Stmts,
+                              FPOptionsOverride(), Loc, Loc);
+}
 
 // The body of a function declared with the [[sycl_kernel_entry_point]]
 // attribute is cloned and transformed to substitute references to the original
@@ -7923,9 +8527,10 @@ class OutlinedFunctionDeclBodyInstantiator
 public:
   using ParmDeclMap = llvm::DenseMap<ParmVarDecl *, VarDecl *>;
 
-  OutlinedFunctionDeclBodyInstantiator(Sema &S, ParmDeclMap &M)
+  OutlinedFunctionDeclBodyInstantiator(Sema &S, ParmDeclMap &M,
+                                       FunctionDecl *FD)
       : TreeTransform<OutlinedFunctionDeclBodyInstantiator>(S), SemaRef(S),
-        MapRef(M) {}
+        MapRef(M), FD(FD) {}
 
   // A new set of AST nodes is always required.
   bool AlwaysRebuild() { return true; }
@@ -7937,10 +8542,10 @@ public:
       ParmDeclMap::iterator I = MapRef.find(PVD);
       if (I != MapRef.end()) {
         VarDecl *VD = I->second;
-        assert(SemaRef.getASTContext().hasSameUnqualifiedType(PVD->getType(),
-                                                              VD->getType()));
-        assert(!VD->getType().isMoreQualifiedThan(PVD->getType(),
-                                                  SemaRef.getASTContext()));
+        assert(SemaRef.getASTContext().hasSameUnqualifiedType(
+            PVD->getType().getNonReferenceType(), VD->getType()));
+        assert(!VD->getType().isMoreQualifiedThan(
+            PVD->getType().getNonReferenceType(), SemaRef.getASTContext()));
         VD->setIsUsed();
         return DeclRefExpr::Create(
             SemaRef.getASTContext(), DRE->getQualifierLoc(),
@@ -7951,18 +8556,62 @@ public:
     return DRE;
   }
 
+  // Diagnose CXXThisExpr in a potentially evaluated expression.
+  ExprResult TransformCXXThisExpr(CXXThisExpr *CTE) {
+    if (SemaRef.currentEvaluationContext().isPotentiallyEvaluated()) {
+      SemaRef.Diag(CTE->getExprLoc(), diag::err_sycl_entry_point_invalid_this)
+          << (CTE->isImplicitCXXThis() ? /* implicit */ 1 : /* empty */ 0)
+          << FD->getAttr<SYCLKernelEntryPointAttr>();
+    }
+    return CTE;
+  }
+
 private:
   Sema &SemaRef;
   ParmDeclMap &MapRef;
+  FunctionDecl *FD;
 };
+
+OutlinedFunctionDecl *BuildSYCLKernelEntryPointOutline(Sema &SemaRef,
+                                                       FunctionDecl *FD,
+                                                       CompoundStmt *Body) {
+  using ParmDeclMap = OutlinedFunctionDeclBodyInstantiator::ParmDeclMap;
+  ParmDeclMap ParmMap;
+
+  OutlinedFunctionDecl *OFD = OutlinedFunctionDecl::Create(
+      SemaRef.getASTContext(), FD, FD->getNumParams());
+  unsigned i = 0;
+  for (ParmVarDecl *PVD : FD->parameters()) {
+    ImplicitParamDecl *IPD = ImplicitParamDecl::Create(
+        SemaRef.getASTContext(), OFD, SourceLocation(), PVD->getIdentifier(),
+        PVD->getType().getNonReferenceType(), ImplicitParamKind::Other);
+    OFD->setParam(i, IPD);
+    ParmMap[PVD] = IPD;
+    ++i;
+  }
+
+  OutlinedFunctionDeclBodyInstantiator OFDBodyInstantiator(SemaRef, ParmMap,
+                                                           FD);
+  Stmt *OFDBody = OFDBodyInstantiator.TransformStmt(Body).get();
+  OFD->setBody(OFDBody);
+  OFD->setNothrow();
+
+  return OFD;
+}
 
 } // unnamed namespace
 
 StmtResult SemaSYCL::BuildSYCLKernelCallStmt(FunctionDecl *FD,
-                                             CompoundStmt *Body) {
+                                             CompoundStmt *Body,
+                                             Expr *LaunchIdExpr) {
   assert(!FD->isInvalidDecl());
   assert(!FD->isTemplated());
   assert(FD->hasPrototype());
+  // The current context must be the function definition context to ensure
+  // that name lookup and parameter and local variable creation are performed
+  // within the correct scope.
+  assert(SemaRef.CurContext == FD && "The current declaration context does not "
+                                     "match the requested function context");
 
   const auto *SKEPAttr = FD->getAttr<SYCLKernelEntryPointAttr>();
   assert(SKEPAttr && "Missing sycl_kernel_entry_point attribute");
@@ -7975,29 +8624,28 @@ StmtResult SemaSYCL::BuildSYCLKernelCallStmt(FunctionDecl *FD,
       getASTContext().getSYCLKernelInfo(SKEPAttr->getKernelName());
   assert(declaresSameEntity(SKI.getKernelEntryPointDecl(), FD) &&
          "SYCL kernel name conflict");
-  (void)SKI;
 
-  using ParmDeclMap = OutlinedFunctionDeclBodyInstantiator::ParmDeclMap;
-  ParmDeclMap ParmMap;
-
-  assert(SemaRef.CurContext == FD);
+  // Build the outline of the synthesized device entry point function.
   OutlinedFunctionDecl *OFD =
-      OutlinedFunctionDecl::Create(getASTContext(), FD, FD->getNumParams());
-  unsigned i = 0;
-  for (ParmVarDecl *PVD : FD->parameters()) {
-    ImplicitParamDecl *IPD = ImplicitParamDecl::Create(
-        getASTContext(), OFD, SourceLocation(), PVD->getIdentifier(),
-        PVD->getType(), ImplicitParamKind::Other);
-    OFD->setParam(i, IPD);
-    ParmMap[PVD] = IPD;
-    ++i;
-  }
+      BuildSYCLKernelEntryPointOutline(SemaRef, FD, Body);
+  assert(OFD);
 
-  OutlinedFunctionDeclBodyInstantiator OFDBodyInstantiator(SemaRef, ParmMap);
-  Stmt *OFDBody = OFDBodyInstantiator.TransformStmt(Body).get();
-  OFD->setBody(OFDBody);
-  OFD->setNothrow();
-  Stmt *NewBody = new (getASTContext()) SYCLKernelCallStmt(Body, OFD);
+  // Build the host kernel launch statement. An appropriate source location
+  // is required to emit diagnostics.
+  SourceLocation Loc = Body->getLBracLoc();
+  StmtResult LaunchResult =
+      BuildSYCLKernelLaunchCallStmt(SemaRef, FD, &SKI, LaunchIdExpr, Loc);
+  if (LaunchResult.isInvalid())
+    return StmtError();
+
+  Stmt *NewBody =
+      new (getASTContext()) SYCLKernelCallStmt(Body, LaunchResult.get(), OFD);
 
   return NewBody;
+}
+
+StmtResult SemaSYCL::BuildUnresolvedSYCLKernelCallStmt(CompoundStmt *Body,
+                                                       Expr *LaunchIdExpr) {
+  return UnresolvedSYCLKernelCallStmt::Create(SemaRef.getASTContext(), Body,
+                                              LaunchIdExpr);
 }

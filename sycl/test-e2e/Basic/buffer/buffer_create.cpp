@@ -8,10 +8,8 @@
 // RUN: %{run} %t.out 2>&1 | FileCheck %s
 // UNSUPPORTED: ze_debug
 
-// L0v2 adapter doesn't optimize buffer creation based on device type yet
-// (integrated buffer implementation needs more work).
-// UNSUPPORTED: level_zero_v2_adapter
-// UNSUPPORTED-TRACKER: https://github.com/intel/llvm/issues/20121
+// UNSUPPORTED: windows && gpu-intel-gen12
+// UNSUPPORTED-TRACKER: https://github.com/intel/llvm/issues/21954
 
 #include <iostream>
 #include <level_zero/ze_api.h>

@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -54,9 +53,16 @@ struct DeviceInfo {
   std::queue<std::shared_ptr<AllocInfo>> Quarantine;
   size_t QuarantineSize = 0;
 
+  AllocInfoList AllocInfos;
+
   // Device handles are special and alive in the whole process lifetime,
   // so we needn't retain&release here.
   explicit DeviceInfo(ur_device_handle_t Device) : Handle(Device) {}
+
+  void insertAllocInfo(std::shared_ptr<AllocInfo> &AI) {
+    std::scoped_lock<ur_shared_mutex> Guard(AllocInfos.Mutex);
+    AllocInfos.List.emplace_back(AI);
+  }
 };
 
 struct QueueInfo {
@@ -88,14 +94,17 @@ struct KernelInfo {
   bool IsInstrumented = false;
   // check shadow bounds
   bool IsCheckShadowBounds = false;
+  // might have indirect access
+  bool IsIndirectAccess = false;
 
   // lock this mutex if following fields are accessed
   ur_shared_mutex Mutex;
-  std::unordered_map<uint32_t, std::shared_ptr<MemBuffer>> BufferArgs;
   std::unordered_map<uint32_t, std::pair<const void *, StackTrace>> PointerArgs;
 
   // Need preserve the order of local arguments
   std::map<uint32_t, LocalArgsInfo> LocalArgs;
+
+  std::vector<ur_exp_kernel_arg_properties_t> ArgProps;
 
   explicit KernelInfo(ur_kernel_handle_t Kernel) : Handle(Kernel) {
     [[maybe_unused]] auto Result =
@@ -147,13 +156,14 @@ struct ContextInfo {
   std::atomic<int32_t> RefCount = 1;
 
   std::vector<ur_device_handle_t> DeviceList;
-  std::unordered_map<ur_device_handle_t, AllocInfoList> AllocInfosMap;
 
   ur_shared_mutex InternalQueueMapMutex;
   std::unordered_map<ur_device_handle_t, std::optional<ManagedQueue>>
       InternalQueueMap;
 
   std::optional<Quarantine> m_Quarantine;
+
+  DeferredEventList DeferredEvents;
 
   AsanStatsWrapper Stats;
 
@@ -168,15 +178,6 @@ struct ContextInfo {
   }
 
   ~ContextInfo();
-
-  void insertAllocInfo(const std::vector<ur_device_handle_t> &Devices,
-                       std::shared_ptr<AllocInfo> &AI) {
-    for (auto Device : Devices) {
-      auto &AllocInfos = AllocInfosMap[Device];
-      std::scoped_lock<ur_shared_mutex> Guard(AllocInfos.Mutex);
-      AllocInfos.List.emplace_back(AI);
-    }
-  }
 
   ur_usm_pool_handle_t getUSMPool();
 
@@ -233,9 +234,9 @@ struct AsanRuntimeDataWrapper {
 
     Host.NumLocalArgs = LocalArgs.size();
     const size_t LocalArgsInfoSize = sizeof(LocalArgsInfo) * Host.NumLocalArgs;
-    UR_CALL(getContext()->urDdiTable.USM.pfnDeviceAlloc(
-        Context, Device, nullptr, nullptr, LocalArgsInfoSize,
-        ur_cast<void **>(&Host.LocalArgs)));
+    UR_CALL(SafeAllocate(Context, Device, LocalArgsInfoSize, nullptr, nullptr,
+                         AllocType::DEVICE_USM,
+                         ur_cast<void **>(&Host.LocalArgs)));
 
     UR_CALL(getContext()->urDdiTable.Enqueue.pfnUSMMemcpy(
         Queue, true, Host.LocalArgs, &LocalArgs[0], LocalArgsInfoSize, 0,
@@ -249,7 +250,7 @@ struct LaunchInfo {
   ur_context_handle_t Context = nullptr;
   ur_device_handle_t Device = nullptr;
   const size_t *GlobalWorkSize = nullptr;
-  const size_t *GlobalWorkOffset = nullptr;
+  std::vector<size_t> GlobalWorkOffset;
   std::vector<size_t> LocalWorkSize;
   uint32_t WorkDim = 0;
 
@@ -259,11 +260,18 @@ struct LaunchInfo {
              const size_t *GlobalWorkSize, const size_t *LocalWorkSize,
              const size_t *GlobalWorkOffset, uint32_t WorkDim)
       : Context(Context), Device(Device), GlobalWorkSize(GlobalWorkSize),
-        GlobalWorkOffset(GlobalWorkOffset), WorkDim(WorkDim),
-        Data(Context, Device) {
+        WorkDim(WorkDim), Data(Context, Device) {
     if (LocalWorkSize) {
       this->LocalWorkSize =
           std::vector<size_t>(LocalWorkSize, LocalWorkSize + WorkDim);
+    }
+    // UR doesn't allow GlobalWorkOffset is null, we need to construct a zero
+    // value array if user doesn't specify its value.
+    if (GlobalWorkOffset) {
+      this->GlobalWorkOffset =
+          std::vector<size_t>(GlobalWorkOffset, GlobalWorkOffset + WorkDim);
+    } else {
+      this->GlobalWorkOffset = std::vector<size_t>(WorkDim, 0);
     }
     [[maybe_unused]] auto Result =
         getContext()->urDdiTable.Context.pfnRetain(Context);
@@ -294,9 +302,9 @@ public:
 
   ur_result_t allocateMemory(ur_context_handle_t Context,
                              ur_device_handle_t Device,
-                             const ur_usm_desc_t *Properties,
-                             ur_usm_pool_handle_t Pool, size_t Size,
+                             const AllocMemoryParams &Params, size_t Size,
                              AllocType Type, void **ResultPtr);
+
   ur_result_t releaseMemory(ur_context_handle_t Context, void *Ptr);
 
   ur_result_t registerProgram(ur_program_handle_t Program);
@@ -375,8 +383,7 @@ public:
   ur_shared_mutex KernelLaunchMutex;
 
 private:
-  ur_result_t updateShadowMemory(std::shared_ptr<ContextInfo> &ContextInfo,
-                                 std::shared_ptr<DeviceInfo> &DeviceInfo,
+  ur_result_t updateShadowMemory(std::shared_ptr<DeviceInfo> &DeviceInfo,
                                  ur_queue_handle_t Queue);
 
   ur_result_t enqueueAllocInfo(std::shared_ptr<DeviceInfo> &DeviceInfo,

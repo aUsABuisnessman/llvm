@@ -70,13 +70,13 @@ runs:
       ninja -C build-cts -k0 $( [ -n "$CTS_TESTS_TO_BUILD" ] && echo "$CTS_TESTS_TO_BUILD" || echo "test_conformance")
 
   - name: Pack SYCL-CTS binaries
-    if: always() && !cancelled() && inputs.testing_mode == 'build-only'
+    if:  ${{ !cancelled() && inputs.testing_mode == 'build-only' }}
     shell: bash
     run: tar -I 'zstd -9' -cf sycl_cts_bin.tar.zst -C ./build-cts/bin .
 
   - name: Upload SYCL-CTS binaries
-    if: always() && !cancelled() && inputs.testing_mode == 'build-only'
-    uses: actions/upload-artifact@v4
+    if:  ${{ !cancelled() && inputs.testing_mode == 'build-only' }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
     with:
       name: ${{ inputs.binaries_artifact }}
       path: sycl_cts_bin.tar.zst
@@ -84,7 +84,7 @@ runs:
 
   - name: Download SYCL-CTS binaries
     if: inputs.testing_mode == 'run-only'
-    uses: actions/download-artifact@v4
+    uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
     with:
       name: ${{ inputs.binaries_artifact }}
 
@@ -97,7 +97,7 @@ runs:
 
   - name: SYCL CTS List devices
     # Proceed with execution even if the 'build' step did not succeed.
-    if: (always() && !cancelled()) && inputs.testing_mode != 'build-only'
+    if: ${{ !cancelled() && inputs.testing_mode != 'build-only' }}
     shell: bash
     env:
       ONEAPI_DEVICE_SELECTOR: ${{ inputs.target_devices }}
@@ -131,7 +131,7 @@ runs:
 
   - name: Run SYCL CTS tests
     # Proceed with execution even if the previous two steps did not succeed.
-    if: (always() && !cancelled()) && inputs.testing_mode != 'build-only'
+    if: ${{ !cancelled() && inputs.testing_mode != 'build-only' }}
     env:
       ONEAPI_DEVICE_SELECTOR: ${{ inputs.target_devices }}
     # By-default GitHub actions execute the "run" shell script with -e option,

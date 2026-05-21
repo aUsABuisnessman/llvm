@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -14,13 +13,38 @@
 #pragma once
 
 #include "sanitizer_libdevice.hpp"
-#include "ur_api.h"
+#include "unified-runtime/ur_api.h"
+#include "ur/ur.hpp"
 #include "ur_sanitizer_layer.hpp"
 
 #include <string>
 #include <vector>
 
 namespace ur_sanitizer_layer {
+
+// Accumulates events whose release must be deferred until a safe point
+// (e.g., context release). L0 may not retain input events passed to
+// pfnEventsWait long enough for the caller to release them immediately.
+struct DeferredEventList {
+  void add(const std::vector<ur_event_handle_t> &Events) {
+    std::scoped_lock<ur_shared_mutex> Lock(Mutex);
+    List.insert(List.end(), Events.begin(), Events.end());
+  }
+
+  void releaseAll() {
+    std::scoped_lock<ur_shared_mutex> Lock(Mutex);
+    for (auto &E : List) {
+      [[maybe_unused]] auto Result =
+          getContext()->urDdiTable.Event.pfnRelease(E);
+      assert(Result == UR_RESULT_SUCCESS);
+    }
+    List.clear();
+  }
+
+private:
+  ur_shared_mutex Mutex;
+  std::vector<ur_event_handle_t> List;
+};
 
 struct ManagedQueue {
   ManagedQueue(ur_context_handle_t Context, ur_device_handle_t Device,
@@ -70,18 +94,19 @@ size_t GetVirtualMemGranularity(ur_context_handle_t Context,
                                 ur_device_handle_t Device);
 
 template <class T>
-ur_result_t EnqueueUSMSet(ur_queue_handle_t Queue, void *Ptr, T Value,
+ur_result_t EnqueueUSMSet(ur_queue_handle_t Queue, void *Ptr, T *Value,
                           size_t Size, uint32_t NumEvents = 0,
                           const ur_event_handle_t *EventWaitList = nullptr,
                           ur_event_handle_t *OutEvent = nullptr) {
   assert(Size % sizeof(T) == 0);
-  thread_local static T StaticValue;
-
-  StaticValue = Value;
   return getContext()->urDdiTable.Enqueue.pfnUSMFill(
-      Queue, Ptr, sizeof(T), &StaticValue, Size, NumEvents, EventWaitList,
-      OutEvent);
+      Queue, Ptr, sizeof(T), Value, Size, NumEvents, EventWaitList, OutEvent);
 }
+
+ur_result_t EnqueueUSMSetZero(ur_queue_handle_t Queue, void *Ptr, size_t Size,
+                              uint32_t NumEvents = 0,
+                              const ur_event_handle_t *EventWaitList = nullptr,
+                              ur_event_handle_t *OutEvent = nullptr);
 
 void PrintUrBuildLogIfError(ur_result_t Result, ur_program_handle_t Program,
                             ur_device_handle_t *Devices, size_t NumDevices);

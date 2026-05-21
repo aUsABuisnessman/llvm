@@ -1,10 +1,9 @@
 /*
  *
- * Copyright (C) 2023 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
  * Exceptions.
- * See LICENSE.TXT
+ * See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -17,7 +16,7 @@
 #include "utils.hpp"
 #include <cstdlib>
 #include <string_view>
-#include <ur_api.h>
+#include <unified-runtime/ur_api.h>
 
 namespace urinfo {
 inline void printLoaderConfigInfos(ur_loader_config_handle_t hLoaderConfig,
@@ -351,6 +350,26 @@ inline void printDeviceInfos(ur_device_handle_t hDevice,
   std::cout << prefix;
   printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_NODE_MASK);
   std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice,
+                            UR_DEVICE_INFO_PREFERRED_VECTOR_WIDTH_LONG_LONG);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice,
+                            UR_DEVICE_INFO_NATIVE_VECTOR_WIDTH_LONG_LONG);
+  std::cout << prefix;
+  printDeviceInfo<size_t>(hDevice, UR_DEVICE_INFO_MAX_WORK_GROUPS);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_XE_STACK_COUNT);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_XE_REGIONS_PER_STACK);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_XE_CLUSTERS_PER_REGION);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_XE_CORES_PER_CLUSTER);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_EUS_PER_XE_CORE);
+  std::cout << prefix;
+  printDeviceInfo<uint32_t>(hDevice, UR_DEVICE_INFO_MAX_LANES_PER_HW_THREAD);
+  std::cout << prefix;
   printDeviceInfo<ur_bool_t>(hDevice,
                              UR_DEVICE_INFO_COMMAND_BUFFER_SUPPORT_EXP);
   std::cout << prefix;
@@ -460,6 +479,12 @@ inline void printDeviceInfos(ur_device_handle_t hDevice,
   std::cout << prefix;
   printDeviceInfo<ur_bool_t>(hDevice, UR_DEVICE_INFO_IS_INTEGRATED_GPU);
   std::cout << prefix;
+  printDeviceInfo<ur_bool_t>(
+      hDevice, UR_DEVICE_INFO_GRAPH_RECORD_AND_REPLAY_SUPPORT_EXP);
+  std::cout << prefix;
+  printDeviceInfo<ur_bool_t>(
+      hDevice, UR_DEVICE_INFO_USM_HOST_ALLOC_REGISTER_SUPPORT_EXP);
+  std::cout << prefix;
   printDeviceInfo<ur_bool_t>(hDevice, UR_DEVICE_INFO_USM_P2P_SUPPORT_EXP);
   std::cout << prefix;
   printDeviceInfo<ur_bool_t>(hDevice,
@@ -474,5 +499,8 @@ inline void printDeviceInfos(ur_device_handle_t hDevice,
   std::cout << prefix;
   printDeviceInfo<ur_bool_t>(
       hDevice, UR_DEVICE_INFO_MEMORY_EXPORT_EXPORTABLE_DEVICE_MEM_EXP);
+  std::cout << prefix;
+  printDeviceInfo<ur_bool_t>(hDevice,
+                             UR_DEVICE_INFO_ENQUEUE_HOST_TASK_SUPPORT_EXP);
 }
 } // namespace urinfo

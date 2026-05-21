@@ -9,26 +9,56 @@ else()
 set(SYCL_JIT_VIRTUAL_TOOLCHAIN_ROOT "/sycl-jit-toolchain/")
 endif()
 
-set(SYCL_JIT_RESOURCE_INSTALL_COMPONENTS sycl-headers OpenCL-Headers clang-resource-headers)
 
-if ("libclc" IN_LIST LLVM_ENABLE_PROJECTS)
-  list(APPEND SYCL_JIT_RESOURCE_INSTALL_COMPONENTS libspirv-builtins)
+if (NOT "libdevice" IN_LIST LLVM_ENABLE_PROJECTS)
+  message(FATAL_ERROR "libdevice is required for jit-compiler but not present in LLVM_ENABLE_PROJECTS")
 endif()
 
-if ("libdevice" IN_LIST LLVM_ENABLE_PROJECTS)
-  list(APPEND SYCL_JIT_RESOURCE_INSTALL_COMPONENTS libsycldevice)
+set(SYCL_JIT_RESOURCE_INSTALL_COMPONENTS
+  sycl-headers
+  OpenCL-Headers
+  clang-resource-headers
+  libsycldevice)
+
+set(libclc_enabled FALSE)
+foreach(target IN LISTS LLVM_RUNTIME_TARGETS)
+  if("libclc" IN_LIST RUNTIMES_${target}_LLVM_ENABLE_RUNTIMES)
+    set(libclc_enabled TRUE)
+    break()
+  endif()
+endforeach()
+
+if (libclc_enabled)
+  # If some targets required `libclc` then we should embed it for the
+  # `sycl-jit`.
+  list(APPEND SYCL_JIT_RESOURCE_INSTALL_COMPONENTS libspirv-builtins)
 endif()
 
 set(SYCL_JIT_RESOURCE_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/rtc-resources-install)
 
 set(SYCL_JIT_PREPARE_RESOURCE_COMMANDS)
-foreach(component IN LISTS SYCL_JIT_RESOURCE_INSTALL_COMPONENTS)
+
+function(sycl_jit_add_install_command component binary_dir)
   list(APPEND SYCL_JIT_PREPARE_RESOURCE_COMMANDS
-    COMMAND ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --prefix ${SYCL_JIT_RESOURCE_INSTALL_DIR} --component "${component}"
+    COMMAND ${CMAKE_COMMAND} --install ${binary_dir} --prefix ${SYCL_JIT_RESOURCE_INSTALL_DIR} --component "${component}"
   )
+  set(SYCL_JIT_PREPARE_RESOURCE_COMMANDS "${SYCL_JIT_PREPARE_RESOURCE_COMMANDS}" PARENT_SCOPE)
+endfunction()
+
+foreach(component IN LISTS SYCL_JIT_RESOURCE_INSTALL_COMPONENTS)
+  if("${component}" STREQUAL "libspirv-builtins")
+    list(APPEND SYCL_JIT_RESOURCE_DEPS libclc)
+    foreach(tgt IN LISTS LLVM_RUNTIME_TARGETS)
+      if("libclc" IN_LIST RUNTIMES_${tgt}_LLVM_ENABLE_RUNTIMES)
+        sycl_jit_add_install_command("${component}" "${CMAKE_BINARY_DIR}/runtimes/runtimes-${tgt}-bins/libclc")
+      endif()
+    endforeach()
+  else()
+    list(APPEND SYCL_JIT_RESOURCE_DEPS ${component})
+    sycl_jit_add_install_command("${component}" "${CMAKE_BINARY_DIR}")
+  endif()
 endforeach()
 
-set(SYCL_JIT_RESOURCE_DEPS ${SYCL_JIT_RESOURCE_INSTALL_COMPONENTS})
   # OpenCL-Headers doesn't have a corresponding build target:
 list(FILTER SYCL_JIT_RESOURCE_DEPS EXCLUDE REGEX "^OpenCL-Headers$")
 
@@ -138,9 +168,15 @@ add_llvm_library(sycl-jit
    SPIRVLib
    ${LLVM_TARGETS_TO_BUILD}
 
+# INTEL_CUSTOMIZATION
+# Reusing PCH for Core would cause extra warnings in ADT
+  DISABLE_PCH_REUSE
+#end INTEL_CUSTOMIZATION
+
    LINK_LIBS
    clangBasic
    clangDriver
+   clangOptions
    clangFrontend
    clangCodeGen
    clangTooling
@@ -152,6 +188,9 @@ if(WIN32)
 endif()
 
 target_compile_options(sycl-jit PRIVATE ${SYCL_JIT_WARNING_FLAGS})
+# Host GCC can hit -Werror=conversion on Clang headers in DeviceCompilation.cpp;
+target_compile_options(sycl-jit PRIVATE
+  $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-error=conversion>)
 
 # Mark LLVM and SPIR-V headers as system headers to ignore warnigns in them.
 # This classification remains intact even if the same paths are added as normal

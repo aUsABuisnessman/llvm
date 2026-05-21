@@ -1,6 +1,5 @@
-# Copyright (C) 2023 Intel Corporation
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 set(NATIVE_CPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "Native CPU adapter directory")
@@ -21,6 +20,7 @@ add_ur_adapter(${TARGET_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/device.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/enqueue.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/event.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/graph.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/image.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/kernel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/kernel.hpp

@@ -11,7 +11,6 @@
 #pragma once
 
 #include "llvm/ADT/SetVector.h"
-#include "llvm/SYCLLowerIR/SYCLDeviceLibReqMask.h"
 #include "llvm/Support/PropertySetIO.h"
 #include <string>
 namespace llvm {
@@ -41,7 +40,8 @@ PropSetRegTy computeDeviceLibProperties(const Module &M,
 PropSetRegTy computeModuleProperties(const Module &M,
                                      const EntryPointSet &EntryPoints,
                                      const GlobalBinImageProps &GlobProps,
-                                     bool AllowDeviceImageDependencies);
+                                     bool AllowDeviceImageDependencies,
+                                     int IdQueriesRange);
 
 std::string computeModuleSymbolTable(const Module &M,
                                      const EntryPointSet &EntryPoints);

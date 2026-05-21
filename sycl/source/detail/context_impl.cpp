@@ -128,7 +128,11 @@ context_impl::~context_impl() {
       if (DGEntry != nullptr)
         DGEntry->removeAssociatedResources(this);
     }
-    MCachedLibPrograms.clear();
+    // Free all profile counter USM allocations associated with this context.
+    for (DeviceGlobalMapEntry *DGEntry :
+         detail::ProgramManager::getInstance()
+             .getProfileCounterDeviceGlobalEntries(this))
+      DGEntry->cleanupProfileCounter(this);
     // TODO catch an exception and put it to list of asynchronous exceptions
     getAdapter().call_nocheck<UrApiKind::urContextRelease>(MContext);
   } catch (std::exception &e) {
@@ -212,72 +216,8 @@ context_impl::get_info<info::context::atomic_fence_scope_capabilities>() const {
   return CapabilityList;
 }
 
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::platform::version::return_type
-context_impl::get_backend_info<info::platform::version>() const {
-  if (getBackend() != backend::opencl) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::platform::version info descriptor can "
-                          "only be queried with an OpenCL backend");
-  }
-  return MDevices[0]->get_platform().get_info<info::platform::version>();
-}
-#endif
-
 device select_device(DSelectorInvocableType DeviceSelectorInvocable,
                      std::vector<device> &Devices);
-
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::device::version::return_type
-context_impl::get_backend_info<info::device::version>() const {
-  if (getBackend() != backend::opencl) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::device::version info descriptor can only "
-                          "be queried with an OpenCL backend");
-  }
-  auto Devices = get_info<info::context::devices>();
-  if (Devices.empty()) {
-    return "No available device";
-  }
-  // Use default selector to pick a device.
-  return select_device(default_selector_v, Devices)
-      .get_info<info::device::version>();
-}
-#endif
-
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-template <>
-typename info::device::backend_version::return_type
-context_impl::get_backend_info<info::device::backend_version>() const {
-  if (getBackend() != backend::ext_oneapi_level_zero) {
-    throw sycl::exception(errc::backend_mismatch,
-                          "the info::device::backend_version info descriptor "
-                          "can only be queried with a Level Zero backend");
-  }
-  return "";
-  // Currently The Level Zero backend does not define the value of this
-  // information descriptor and implementations are encouraged to return the
-  // empty string as per specification.
-}
-#endif
-
-ur_context_handle_t &context_impl::getHandleRef() { return MContext; }
-const ur_context_handle_t &context_impl::getHandleRef() const {
-  return MContext;
-}
-
-KernelProgramCache &context_impl::getKernelProgramCache() const {
-  return MKernelProgramCache;
-}
-
-bool context_impl::hasDevice(const detail::device_impl &Device) const {
-  for (device_impl *D : MDevices)
-    if (D == &Device)
-      return true;
-  return false;
-}
 
 device_impl *
 context_impl::findMatchingDeviceImpl(ur_device_handle_t &DeviceUR) const {
@@ -298,20 +238,6 @@ ur_native_handle_t context_impl::getNative() const {
   return Handle;
 }
 
-bool context_impl::isBufferLocationSupported() const {
-  if (MSupportBufferLocationByDevices != NotChecked)
-    return MSupportBufferLocationByDevices == Supported ? true : false;
-  // Check that devices within context have support of buffer location
-  MSupportBufferLocationByDevices = Supported;
-  for (device_impl *Device : MDevices) {
-    if (!Device->has_extension("cl_intel_mem_alloc_buffer_location")) {
-      MSupportBufferLocationByDevices = NotSupported;
-      break;
-    }
-  }
-  return MSupportBufferLocationByDevices == Supported ? true : false;
-}
-
 void context_impl::addAssociatedDeviceGlobal(const void *DeviceGlobalPtr) {
   std::lock_guard<std::mutex> Lock{MAssociatedDeviceGlobalsMutex};
   MAssociatedDeviceGlobals.insert(DeviceGlobalPtr);
@@ -320,6 +246,32 @@ void context_impl::addAssociatedDeviceGlobal(const void *DeviceGlobalPtr) {
 void context_impl::removeAssociatedDeviceGlobal(const void *DeviceGlobalPtr) {
   std::lock_guard<std::mutex> Lock{MAssociatedDeviceGlobalsMutex};
   MAssociatedDeviceGlobals.erase(DeviceGlobalPtr);
+}
+
+void context_impl::registerNativeGraph(
+    ur_exp_graph_handle_t UrGraphHandle,
+    std::shared_ptr<sycl::ext::oneapi::experimental::detail::graph_impl>
+        Graph) {
+  assert(UrGraphHandle != nullptr && Graph != nullptr);
+  std::lock_guard<std::mutex> Lock(MNativeGraphRegistryMutex);
+  MNativeGraphRegistry.try_emplace(UrGraphHandle, Graph);
+}
+
+std::shared_ptr<sycl::ext::oneapi::experimental::detail::graph_impl>
+context_impl::getNativeGraph(ur_exp_graph_handle_t UrGraphHandle) const {
+  assert(UrGraphHandle != nullptr);
+  std::lock_guard<std::mutex> Lock(MNativeGraphRegistryMutex);
+  auto It = MNativeGraphRegistry.find(UrGraphHandle);
+  if (It != MNativeGraphRegistry.end()) {
+    return It->second.lock();
+  }
+  return nullptr;
+}
+
+void context_impl::deregisterNativeGraph(ur_exp_graph_handle_t UrGraphHandle) {
+  assert(UrGraphHandle != nullptr);
+  std::lock_guard<std::mutex> Lock(MNativeGraphRegistryMutex);
+  MNativeGraphRegistry.erase(UrGraphHandle);
 }
 
 void context_impl::addDeviceGlobalInitializer(
@@ -336,20 +288,50 @@ void context_impl::addDeviceGlobalInitializer(
   }
 }
 
+void context_impl::removeDeviceGlobalInitializer(
+    ur_program_handle_t Program, const RTDeviceBinaryImage *BinImage) {
+  std::lock_guard<std::mutex> Lock(MDeviceGlobalInitializersMutex);
+
+  for (auto It = MDeviceGlobalInitializers.begin();
+       It != MDeviceGlobalInitializers.end();) {
+    const bool ProgramMatches = It->first.first == Program;
+    const bool ImageMatches = It->second.MBinImage == BinImage;
+
+    if (!ProgramMatches || !ImageMatches) {
+      ++It;
+      continue;
+    }
+
+    {
+      std::lock_guard<std::mutex> InitLock(It->second.MDeviceGlobalInitMutex);
+      if (!It->second.MDeviceGlobalsFullyInitialized)
+        --MDeviceGlobalNotInitializedCnt;
+      It->second.ClearEvents(getAdapter());
+    }
+
+    It = MDeviceGlobalInitializers.erase(It);
+  }
+}
+
 std::vector<ur_event_handle_t> context_impl::initializeDeviceGlobals(
     ur_program_handle_t NativePrg, queue_impl &QueueImpl,
     detail::kernel_bundle_impl *KernelBundleImplPtr) {
+
   if (!MDeviceGlobalNotInitializedCnt.load(std::memory_order_acquire))
     return {};
 
   detail::adapter_impl &Adapter = getAdapter();
   device_impl &DeviceImpl = QueueImpl.getDeviceImpl();
   std::lock_guard<std::mutex> NativeProgramLock(MDeviceGlobalInitializersMutex);
+
   auto ImgIt = MDeviceGlobalInitializers.find(
       std::make_pair(NativePrg, DeviceImpl.getHandleRef()));
-  if (ImgIt == MDeviceGlobalInitializers.end() ||
-      ImgIt->second.MDeviceGlobalsFullyInitialized)
+  if (ImgIt == MDeviceGlobalInitializers.end()) {
     return {};
+  }
+  if (ImgIt->second.MDeviceGlobalsFullyInitialized) {
+    return {};
+  }
 
   DeviceGlobalInitializer &InitRef = ImgIt->second;
   {
@@ -433,7 +415,7 @@ std::vector<ur_event_handle_t> context_impl::initializeDeviceGlobals(
       }
       // Write the pointer to the device global and store the event in the
       // initialize events list.
-      ur_event_handle_t InitEvent;
+      ur_event_handle_t InitEvent = nullptr;
       void *const &USMPtr = DeviceGlobalUSM.getPtr();
       Adapter.call<UrApiKind::urEnqueueDeviceGlobalVariableWrite>(
           QueueImpl.getHandleRef(), NativePrg,
@@ -514,8 +496,8 @@ std::optional<ur_program_handle_t> context_impl::getProgramForDevImgs(
       if (NProgs == 0)
         continue;
       // If the cache has multiple programs for the identifiers or if we have
-      // already found a program in the cache with the device_global or host
-      // pipe we cannot proceed.
+      // already found a program in the cache with the device_global we cannot
+      // proceed.
       if (NProgs > 1 || (BuildRes && NProgs == 1))
         throw sycl::exception(make_error_code(errc::invalid),
                               "More than one image exists with the " +
@@ -545,15 +527,6 @@ std::optional<ur_program_handle_t> context_impl::getProgramForDeviceGlobal(
     const device &Device, DeviceGlobalMapEntry *DeviceGlobalEntry) {
   return getProgramForDevImgs(Device, DeviceGlobalEntry->MImageIdentifiers,
                               "device_global");
-}
-/// Gets a program associated with a HostPipe Entry from the cache.
-std::optional<ur_program_handle_t>
-context_impl::getProgramForHostPipe(const device &Device,
-                                    HostPipeMapEntry *HostPipeEntry) {
-  // One HostPipe entry belongs to one Img
-  std::set<std::uintptr_t> ImgIdentifiers;
-  ImgIdentifiers.insert(HostPipeEntry->getDevBinImage()->getImageID());
-  return getProgramForDevImgs(Device, ImgIdentifiers, "host_pipe");
 }
 
 void context_impl::verifyProps(const property_list &Props) const {

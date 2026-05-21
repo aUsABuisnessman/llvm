@@ -228,7 +228,7 @@ public:
   virtual context_impl *getWorkerContext() const;
 
   /// Returns true iff the command produces a UR event on non-host devices.
-  virtual bool producesPiEvent() const;
+  virtual bool producesUrEvent() const;
 
   /// Returns true iff this command can be freed by post enqueue cleanup.
   virtual bool supportsPostEnqueueCleanup() const;
@@ -244,19 +244,7 @@ public:
                                                     queue_impl *CommandQueue,
                                                     bool IsHostTaskCommand);
 
-  /// Collect UR events from EventImpls and filter out some of them in case of
-  /// in order queue. Does blocking enqueue if event is expected to produce ur
-  /// event but has empty native handle.
-  std::vector<ur_event_handle_t> getUrEventsBlocking(events_range Events,
-                                                     bool HasEventMode) const;
-
   bool isHostTask() const;
-
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-  // This function is unused and should be removed in the next ABI-breaking
-  // window.
-  bool isFusable() const;
-#endif // __INTEL_PREVIEW_BREAKING_CHANGES
 
 protected:
   std::shared_ptr<queue_impl> MQueue;
@@ -425,7 +413,7 @@ public:
 
   void emitInstrumentationData() override;
 
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
 private:
   ur_result_t enqueueImp() final;
@@ -444,7 +432,7 @@ public:
 
   void printDot(std::ostream &Stream) const final;
   void emitInstrumentationData() override;
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
   bool supportsPostEnqueueCleanup() const final;
   bool readyForCleanup() const final;
 
@@ -471,7 +459,7 @@ public:
 
   void emitInstrumentationData() override;
 
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
   bool supportsPostEnqueueCleanup() const final;
 
@@ -567,7 +555,7 @@ public:
   void printDot(std::ostream &Stream) const final;
   const Requirement *getRequirement() const final { return &MDstReq; }
   void emitInstrumentationData() override;
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
 private:
   ur_result_t enqueueImp() final;
@@ -589,7 +577,7 @@ public:
   const Requirement *getRequirement() const final { return &MDstReq; }
   void emitInstrumentationData() final;
   context_impl *getWorkerContext() const final;
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
 private:
   ur_result_t enqueueImp() final;
@@ -665,7 +653,7 @@ public:
   // is false.
   bool MEventNeeded = true;
 
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
   bool supportsPostEnqueueCleanup() const final;
 
@@ -721,7 +709,7 @@ public:
 
   void printDot(std::ostream &Stream) const final;
   void emitInstrumentationData() final;
-  bool producesPiEvent() const final;
+  bool producesUrEvent() const final;
 
 private:
   ur_result_t enqueueImp() final;
@@ -730,6 +718,9 @@ private:
   std::vector<std::shared_ptr<ext::oneapi::experimental::detail::node_impl>>
       MNodes;
 };
+
+void checkNDRangeBoundsAndThrow(const NDRDescT &NDRDesc,
+                                const uint32_t IdQueriesRange);
 
 // Enqueues a given kernel to a ur_exp_command_buffer_handle_t
 ur_result_t enqueueImpCommandBufferKernel(
@@ -796,7 +787,22 @@ void applyFuncOnFilteredArgs(
   }
 }
 
-void ReverseRangeDimensionsForKernel(NDRDescT &NDR);
+// We have the following mapping between dimensions with SPIR-V builtins:
+// 1D: id[0] -> x
+// 2D: id[0] -> y, id[1] -> x
+// 3D: id[0] -> z, id[1] -> y, id[2] -> x
+// So in order to ensure the correctness we update all the kernel
+// parameters accordingly.
+// Initially we keep the order of NDRDescT as it provided by the user, this
+// simplifies overall handling and do the reverse only when
+// the kernel is enqueued.
+inline void ReverseRangeDimensionsForKernel(NDRDescT &NDR) {
+  if (NDR.Dims > 1) {
+    std::swap(NDR.GlobalSize[0], NDR.GlobalSize[NDR.Dims - 1]);
+    std::swap(NDR.LocalSize[0], NDR.LocalSize[NDR.Dims - 1]);
+    std::swap(NDR.GlobalOffset[0], NDR.GlobalOffset[NDR.Dims - 1]);
+  }
+}
 
 } // namespace detail
 } // namespace _V1

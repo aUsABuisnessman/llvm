@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include <uur/fixtures.h>
@@ -8,10 +7,10 @@
 using urEnqueueDeviceGetGlobalVariableReadWithParamTest =
     uur::urGlobalVariableWithParamTest<uur::BoolTestParam>;
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueDeviceGetGlobalVariableReadWithParamTest,
     testing::ValuesIn(uur::BoolTestParam::makeBoolParam("Blocking")),
-    uur::deviceTestWithParamPrinter<uur::BoolTestParam>);
+    uur::deviceTestWithParamPrinterMulti<uur::BoolTestParam>);
 
 TEST_P(urEnqueueDeviceGetGlobalVariableReadWithParamTest, Success) {
   bool is_blocking = getParam().value;
@@ -25,9 +24,9 @@ TEST_P(urEnqueueDeviceGetGlobalVariableReadWithParamTest, Success) {
   size_t global_size = 1;
 
   // execute the kernel
-  ASSERT_SUCCESS(urEnqueueKernelLaunch(queue, kernel, n_dimensions,
-                                       &global_offset, &global_size, nullptr, 0,
-                                       nullptr, 0, nullptr, nullptr));
+  ASSERT_SUCCESS(urEnqueueKernelLaunchWithArgsExp(
+      queue, kernel, n_dimensions, &global_offset, &global_size, nullptr, 0,
+      nullptr, nullptr, 0, nullptr, nullptr));
   ASSERT_SUCCESS(urQueueFinish(queue));
 
   // read global var back to host
@@ -44,7 +43,8 @@ TEST_P(urEnqueueDeviceGetGlobalVariableReadWithParamTest, Success) {
 }
 
 using urEnqueueDeviceGetGlobalVariableReadTest = uur::urGlobalVariableTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urEnqueueDeviceGetGlobalVariableReadTest);
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(
+    urEnqueueDeviceGetGlobalVariableReadTest);
 
 TEST_P(urEnqueueDeviceGetGlobalVariableReadTest, InvalidNullHandleQueue) {
   ASSERT_EQ_RESULT(urEnqueueDeviceGlobalVariableRead(

@@ -1,9 +1,8 @@
 //===--------- kernel.hpp - Level Zero Adapter ---------------------------===//
 //
-// Copyright (C) 2024 Intel Corporation
 //
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
@@ -67,13 +66,14 @@ public:
   const ze_kernel_properties_t &getProperties(ur_device_handle_t hDevice) const;
 
   // Implementation of urKernelSetArgValue.
-  ur_result_t setArgValue(uint32_t argIndex, size_t argSize,
+  ur_result_t setArgValue(ur_device_handle_t hDevice, uint32_t argIndex,
+                          size_t argSize,
                           const ur_kernel_arg_value_properties_t *pProperties,
                           const void *pArgValue);
 
   // Implementation of urKernelSetArgPointer.
   ur_result_t
-  setArgPointer(uint32_t argIndex,
+  setArgPointer(ur_device_handle_t hDevice, uint32_t argIndex,
                 const ur_kernel_arg_pointer_properties_t *pProperties,
                 const void *pArgValue);
 

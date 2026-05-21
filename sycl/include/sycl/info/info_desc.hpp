@@ -9,12 +9,13 @@
 #pragma once
 
 #include <sycl/detail/defines_elementary.hpp> // for __SYCL2020_DEPRECATED
-#include <ur_api.h>
+#include <unified-runtime/ur_api.h>
 
 // FIXME: .def files included to this file use all sorts of SYCL objects like
 // id, range, traits, etc. We have to include some headers before including .def
 // files.
 #include <sycl/aspects.hpp>
+#include <sycl/detail/device_info_types.hpp>
 #include <sycl/detail/type_traits.hpp>
 #include <sycl/ext/oneapi/experimental/device_architecture.hpp>
 #include <sycl/ext/oneapi/experimental/forward_progress.hpp>
@@ -62,11 +63,11 @@ namespace context {
 enum class device_type : uint32_t {
   cpu = UR_DEVICE_TYPE_CPU,
   gpu = UR_DEVICE_TYPE_GPU,
-  accelerator = UR_DEVICE_TYPE_FPGA,
+  accelerator = 0x10000,
   // TODO: evaluate the need for equivalent UR enums for these types
-  custom,
-  automatic,
-  host,
+  custom = 0x10001,
+  automatic = 0x10002,
+  host = 0x10003,
   all = UR_DEVICE_TYPE_ALL
 };
 

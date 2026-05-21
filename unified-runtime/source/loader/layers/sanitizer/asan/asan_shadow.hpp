@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -48,7 +47,7 @@ struct ShadowMemory {
   virtual uptr MemToShadow(uptr Ptr) = 0;
 
   virtual ur_result_t EnqueuePoisonShadow(ur_queue_handle_t Queue, uptr Ptr,
-                                          uptr Size, u8 Value) = 0;
+                                          uptr Size, const int8_t *Value) = 0;
 
   virtual size_t GetShadowSize() = 0;
 
@@ -80,7 +79,7 @@ struct ShadowMemoryCPU final : public ShadowMemory {
   uptr MemToShadow(uptr Ptr) override;
 
   ur_result_t EnqueuePoisonShadow(ur_queue_handle_t Queue, uptr Ptr, uptr Size,
-                                  u8 Value) override;
+                                  const int8_t *Value) override;
 
   size_t GetShadowSize() override { return 0x80000000000ULL; }
 
@@ -106,7 +105,7 @@ struct ShadowMemoryGPU : public ShadowMemory {
 
   ur_result_t Destory() override;
   ur_result_t EnqueuePoisonShadow(ur_queue_handle_t Queue, uptr Ptr, uptr Size,
-                                  u8 Value) override final;
+                                  const int8_t *Value) override final;
 
   ur_result_t AllocLocalShadow(ur_queue_handle_t Queue, uint32_t NumWG,
                                uptr &Begin, uptr &End) override final;

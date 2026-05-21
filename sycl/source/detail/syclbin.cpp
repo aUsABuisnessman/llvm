@@ -32,8 +32,8 @@ struct OffloadBinaryHeaderType {
   uint8_t Magic[4];
   uint32_t Version;
   uint64_t Size;
-  uint64_t EntryOffset;
-  uint64_t EntrySize;
+  uint64_t EntriesOffset; // V2: Renamed from EntryOffset
+  uint64_t EntriesCount;  // V2: Renamed from EntrySize, now stores count
 };
 struct OffloadBinaryEntryType {
   uint16_t ImageKind;
@@ -98,22 +98,29 @@ std::pair<const char *, size_t> getImageInOffloadBinary(const char *Data,
     throw sycl::exception(make_error_code(errc::invalid),
                           "Incorrect Offload Binary magic number.");
 
-  if (Header->Version != 1)
+  // Support both v1 and v2 formats
+  if (Header->Version == 0 || Header->Version > 2)
     throw sycl::exception(make_error_code(errc::invalid),
                           "Unsupported Offload Binary version number.");
 
-  if (Header->EntrySize != sizeof(OffloadBinaryEntryType))
-    throw sycl::exception(make_error_code(errc::invalid),
-                          "Unexpected number of offload entries.");
+  // V1: EntriesCount was EntrySize and stored sizeof(Entry)
+  // V2: EntriesCount stores the number of entries
+  uint64_t EntriesCount = (Header->Version == 1) ? 1 : Header->EntriesCount;
+  uint64_t EntriesSize = sizeof(OffloadBinaryEntryType) * EntriesCount;
 
-  if (Header->EntryOffset + sizeof(OffloadBinaryEntryType) > Size)
+  if (Header->Version == 1 &&
+      Header->EntriesCount != sizeof(OffloadBinaryEntryType))
     throw sycl::exception(make_error_code(errc::invalid),
-                          "Invalid entry offset.");
+                          "Unexpected entry size for v1 format.");
 
-  // Read the table entry.
+  if (Header->EntriesOffset + EntriesSize > Size)
+    throw sycl::exception(make_error_code(errc::invalid),
+                          "Invalid entries offset.");
+
+  // Read the first entry (for SYCLBIN, we expect a single entry)
   const OffloadBinaryEntryType *Entry =
       reinterpret_cast<const OffloadBinaryEntryType *>(Data +
-                                                       Header->EntryOffset);
+                                                       Header->EntriesOffset);
 
   if (Entry->ImageKind != /*IMG_SYCLBIN*/ 7)
     throw sycl::exception(make_error_code(errc::invalid),
@@ -143,8 +150,6 @@ const char *getDeviceTargetSpecFromTriple(std::string_view Triple) {
     return __SYCL_DEVICE_BINARY_TARGET_SPIRV64_X86_64;
   if (Target == __SYCL_DEVICE_BINARY_TARGET_SPIRV64_GEN)
     return __SYCL_DEVICE_BINARY_TARGET_SPIRV64_GEN;
-  if (Target == __SYCL_DEVICE_BINARY_TARGET_SPIRV64_FPGA)
-    return __SYCL_DEVICE_BINARY_TARGET_SPIRV64_FPGA;
   if (Target == __SYCL_DEVICE_BINARY_TARGET_NVPTX64)
     return __SYCL_DEVICE_BINARY_TARGET_NVPTX64;
   if (Target == __SYCL_DEVICE_BINARY_TARGET_AMDGCN)
@@ -310,10 +315,6 @@ SYCLBINBinaries::SYCLBINBinaries(const char *SYCLBINContent, size_t SYCLBINSize)
           __SYCL_DEVICE_BINARY_TARGET_SPIRV64; // TODO: Determine.
       DeviceBinary.CompileOptions = nullptr;
       DeviceBinary.LinkOptions = nullptr;
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-      DeviceBinary.ManifestStart = nullptr;
-      DeviceBinary.ManifestEnd = nullptr;
-#endif // __INTEL_PREVIEW_BREAKING_CHANGES
       DeviceBinary.BinaryStart =
           reinterpret_cast<const unsigned char *>(IRM.RawIRBytes.data());
       DeviceBinary.BinaryEnd = reinterpret_cast<const unsigned char *>(
@@ -347,10 +348,6 @@ SYCLBINBinaries::SYCLBINBinaries(const char *SYCLBINContent, size_t SYCLBINSize)
           getDeviceTargetSpecFromTriple(TargetTriple);
       DeviceBinary.CompileOptions = nullptr;
       DeviceBinary.LinkOptions = nullptr;
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-      DeviceBinary.ManifestStart = nullptr;
-      DeviceBinary.ManifestEnd = nullptr;
-#endif // __INTEL_PREVIEW_BREAKING_CHANGES
       DeviceBinary.BinaryStart = reinterpret_cast<const unsigned char *>(
           NDCI.RawDeviceCodeImageBytes.data());
       DeviceBinary.BinaryEnd = reinterpret_cast<const unsigned char *>(
@@ -451,6 +448,25 @@ SYCLBINBinaries::getBestCompatibleImages(devices_range Devs,
     Images.insert(BestImagesForDev.cbegin(), BestImagesForDev.cend());
   }
   return {Images.cbegin(), Images.cend()};
+}
+
+std::vector<const RTDeviceBinaryImage *>
+SYCLBINBinaries::getNativeBinaryImages(device_impl &Dev) {
+  std::vector<const RTDeviceBinaryImage *> Images;
+  for (size_t I = 0; I < getNumAbstractModules(); ++I) {
+    const AbstractModuleDesc &AMDesc = AbstractModuleDescriptors[I];
+    // If the target state is executable, try with native images first.
+
+    const RTDeviceBinaryImage *CompatImagePtr = std::find_if(
+        AMDesc.NativeBinaries, AMDesc.NativeBinaries + AMDesc.NumNativeBinaries,
+        [&](const RTDeviceBinaryImage &Img) {
+          return doesDevSupportDeviceRequirements(Dev, Img) &&
+                 doesImageTargetMatchDevice(Img, Dev);
+        });
+    if (CompatImagePtr != AMDesc.NativeBinaries + AMDesc.NumNativeBinaries)
+      Images.push_back(CompatImagePtr);
+  }
+  return Images;
 }
 
 } // namespace detail

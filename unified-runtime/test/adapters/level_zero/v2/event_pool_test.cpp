@@ -1,6 +1,5 @@
-// Copyright (C) 2024 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -15,6 +14,7 @@
 
 #include "level_zero/common.hpp"
 #include "level_zero/device.hpp"
+#include "level_zero/ur_interface_loader.hpp"
 
 #include "../ze_helpers.hpp"
 #include "context.hpp"
@@ -24,6 +24,7 @@
 #include "event_provider_counter.hpp"
 #include "event_provider_normal.hpp"
 #include "queue_handle.hpp"
+#include "uur/checks.h"
 #include "uur/fixtures.h"
 #include "ze_api.h"
 
@@ -37,8 +38,8 @@ using namespace v2;
 static constexpr size_t MAX_DEVICES = 10;
 
 const ur_dditable_t *ur::level_zero::ddi_getter::value() {
-  // Return a blank dditable
   static ur_dditable_t table{};
+  table.Event.pfnRelease = ur::level_zero::urEventRelease;
   return &table;
 };
 
@@ -136,8 +137,8 @@ struct EventPoolTest : public uur::urQueueTestWithParam<ProviderParams> {
           // the provider
           switch (params.provider) {
           case TEST_PROVIDER_COUNTER:
-            return std::make_unique<provider_counter>(platform, context,
-                                                      device);
+            return std::make_unique<provider_counter>(
+                platform, context, params.queue, device, params.flags);
           case TEST_PROVIDER_NORMAL:
             return std::make_unique<provider_normal>(context, params.queue,
                                                      flags);
@@ -147,6 +148,7 @@ struct EventPoolTest : public uur::urQueueTestWithParam<ProviderParams> {
   }
   void TearDown() override {
     cache.reset();
+    mockVec.clear();
     UUR_RETURN_ON_FATAL_FAILURE(urQueueTestWithParam::TearDown());
   }
 
@@ -277,6 +279,7 @@ TEST_P(EventPoolTestWithQueue, WithTimestamp) {
     GTEST_SKIP() << "Profiling needs to be enabled";
   }
 
+  SKIP_IF_BATCHED_QUEUE(queue);
   auto zeEvent = createZeEvent(context, device);
 
   ur_event_handle_t hEvent;

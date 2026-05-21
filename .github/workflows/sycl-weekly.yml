@@ -20,12 +20,14 @@ jobs:
       toolchain_artifact: sycl_linux_default
 
   # This job builds SYCL-CTS with -fsycl-use-spirv-backend-for-spirv-gen.
+  # TODO: Usually there are no new changes on weekends. Consider removing
+  # the ubuntu2204_build job and switching to nightly build instead.
   build-sycl-cts:
     needs: ubuntu2204_build
     permissions:
       contents: write
       packages: read
-    if: ${{ always() && !cancelled() && needs.ubuntu2204_build.outputs.build_conclusion == 'success' }}
+    if: ${{ !cancelled() && needs.ubuntu2204_build.outputs.build_conclusion == 'success' }}
     uses: ./.github/workflows/sycl-linux-run-tests.yml
     with:
       name: Build SYCL-CTS
@@ -45,7 +47,7 @@ jobs:
     permissions:
       contents: write
       packages: read
-    if: ${{ always() && !cancelled() && needs.ubuntu2204_build.outputs.build_conclusion == 'success' }}
+    if: ${{ !cancelled() && needs.ubuntu2204_build.outputs.build_conclusion == 'success' }}
     strategy:
       fail-fast: false
       matrix:

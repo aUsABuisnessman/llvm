@@ -1,13 +1,12 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include <uur/fixtures.h>
 #include <uur/known_failure.h>
 
-using urQueueRetainTest = uur::urQueueTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urQueueRetainTest);
+using urQueueRetainTest = uur::urMultiQueueTypeTest;
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(urQueueRetainTest);
 
 TEST_P(urQueueRetainTest, Success) {
   UUR_KNOWN_FAILURE_ON(uur::NativeCPU{});

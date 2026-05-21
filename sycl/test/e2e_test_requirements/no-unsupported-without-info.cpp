@@ -54,21 +54,14 @@
 // tests to match the required format and in that case you should just update
 // (i.e. reduce) the number and the list below.
 //
-// NUMBER-OF-UNSUPPORTED-WITHOUT-INFO: 149
+// NUMBER-OF-UNSUPPORTED-WITHOUT-INFO: 135
 //
 // List of improperly UNSUPPORTED tests.
 // Remove the CHECK once the test has been properly UNSUPPORTED.
 //
 // CHECK: Adapters/enqueue-arg-order-image.cpp
 // CHECK-NEXT: Adapters/level_zero/batch_event_status.cpp
-// CHECK-NEXT: Adapters/level_zero/batch_test.cpp
-// CHECK-NEXT: Adapters/level_zero/batch_test_copy_with_compute.cpp
-// CHECK-NEXT: Adapters/level_zero/device_scope_events.cpp
-// CHECK-NEXT: Adapters/level_zero/dynamic_batch_test.cpp
-// CHECK-NEXT: Adapters/level_zero/imm_cmdlist_per_thread.cpp
 // CHECK-NEXT: Adapters/level_zero/interop-buffer-ownership.cpp
-// CHECK-NEXT: Adapters/level_zero/interop-buffer.cpp
-// CHECK-NEXT: Adapters/level_zero/interop-direct.cpp
 // CHECK-NEXT: Adapters/level_zero/interop-image-get-native-mem.cpp
 // CHECK-NEXT: Adapters/level_zero/interop-image-ownership.cpp
 // CHECK-NEXT: Adapters/level_zero/interop-image-ownership.cpp
@@ -201,10 +194,3 @@
 // CHECK-NEXT: Tracing/usm/queue_single_task_released_pointer.cpp
 // CHECK-NEXT: USM/badmalloc.cpp
 // CHECK-NEXT: USM/pointer_query_descendent_device.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_arith.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_bitwise.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_class.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_comp_exchange.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_memory_acq_rel.cpp
-// CHECK-NEXT: syclcompat/atomic/atomic_minmax.cpp
-// CHECK-NEXT: syclcompat/kernel/kernel_lin.cpp

@@ -1,8 +1,6 @@
 // REQUIRES: cuda
 
 // RUN: %clangxx -fsycl -fsycl-targets=nvptx64-nvidia-cuda -S -Xclang -emit-llvm %s -o -| FileCheck %s
-// XFAIL: cuda
-// XFAIL-TRACKER: https://github.com/intel/llvm/issues/20109
 
 #include <sycl/sycl.hpp>
 
@@ -15,15 +13,15 @@ SYCL_EXTERNAL void native_math_cuda(
   res_acc[0] = sycl::native::cos(input_acc[0]);
   // CHECK: tail call noundef float @llvm.nvvm.sin.approx.f
   res_acc[1] = sycl::native::sin(input_acc[0]);
-  // CHECK: tail call noundef float @llvm.nvvm.ex2.approx.f
+  // CHECK: tail call contract noundef float @llvm.nvvm.ex2.approx.f
   res_acc[2] = sycl::native::exp2(input_acc[0]);
   // CHECK: tail call noundef float @llvm.nvvm.lg2.approx.f
   res_acc[3] = sycl::native::log2(input_acc[0]);
-  // CHECK: tail call noundef float @llvm.nvvm.rsqrt.approx.f
+  // CHECK: tail call contract noundef float @llvm.nvvm.rsqrt.approx.f
   res_acc[4] = sycl::native::rsqrt(input_acc[0]);
-  // CHECK: tail call noundef float @llvm.nvvm.sqrt.approx.f
+  // CHECK: tail call contract noundef float @llvm.nvvm.sqrt.approx.f
   res_acc[5] = sycl::native::sqrt(input_acc[0]);
-  // CHECK: tail call noundef float @llvm.nvvm.rcp.approx.f
+  // CHECK: tail call contract noundef float @llvm.nvvm.rcp.approx.f
   res_acc[6] = sycl::native::recip(input_acc[0]);
   // CHECK: tail call noundef float @llvm.nvvm.div.approx.f
   res_acc[7] = sycl::native::divide(input_acc[0], input_acc[1]);

@@ -14,9 +14,7 @@
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/SYCLLowerIR/CompileTimePropertiesPass.h"
 #include "llvm/SYCLLowerIR/DeviceGlobals.h"
-#include "llvm/SYCLLowerIR/HostPipes.h"
 #include "llvm/SYCLLowerIR/LowerWGLocalMemory.h"
-#include "llvm/SYCLLowerIR/SYCLDeviceLibReqMask.h"
 #include "llvm/SYCLLowerIR/SYCLKernelParamOptInfo.h"
 #include "llvm/SYCLLowerIR/SYCLUtils.h"
 #include "llvm/SYCLLowerIR/SpecConstants.h"
@@ -55,85 +53,6 @@ bool isModuleUsingMsan(const Module &M) {
 
 bool isModuleUsingTsan(const Module &M) {
   return M.getNamedGlobal("__TsanKernelMetadata");
-}
-
-// This function traverses over reversed call graph by BFS algorithm.
-// It means that an edge links some function @func with functions
-// which contain call of function @func. It starts from
-// @StartingFunction and lifts up until it reach all reachable functions,
-// or it reaches some function containing "referenced-indirectly" attribute.
-// If it reaches "referenced-indirectly" attribute than it returns an empty
-// Optional.
-// Otherwise, it returns an Optional containing a list of reached
-// SPIR kernel function's names.
-static std::optional<std::vector<StringRef>> traverseCGToFindSPIRKernels(
-    const std::vector<Function *> &StartingFunctionVec) {
-  std::queue<const Function *> FunctionsToVisit;
-  std::unordered_set<const Function *> VisitedFunctions;
-  for (const Function *FPtr : StartingFunctionVec)
-    FunctionsToVisit.push(FPtr);
-  std::vector<StringRef> KernelNames;
-
-  while (!FunctionsToVisit.empty()) {
-    const Function *F = FunctionsToVisit.front();
-    FunctionsToVisit.pop();
-
-    auto InsertionResult = VisitedFunctions.insert(F);
-    // It is possible that we insert some particular function several
-    // times in functionsToVisit queue.
-    if (!InsertionResult.second)
-      continue;
-
-    for (const auto *U : F->users()) {
-      const CallInst *CI = dyn_cast<const CallInst>(U);
-      if (!CI)
-        continue;
-
-      const Function *ParentF = CI->getFunction();
-
-      if (VisitedFunctions.count(ParentF))
-        continue;
-
-      if (ParentF->hasFnAttribute("referenced-indirectly"))
-        return {};
-
-      if (ParentF->getCallingConv() == CallingConv::SPIR_KERNEL)
-        KernelNames.push_back(ParentF->getName());
-
-      FunctionsToVisit.push(ParentF);
-    }
-  }
-
-  return {std::move(KernelNames)};
-}
-
-static std::vector<StringRef>
-getKernelNamesUsingSpecialFunctions(const Module &M,
-                                    const std::vector<StringRef> &FNames) {
-  std::vector<Function *> SpecialFunctionVec;
-  for (const auto Fn : FNames) {
-    Function *FPtr = M.getFunction(Fn);
-    if (FPtr)
-      SpecialFunctionVec.push_back(FPtr);
-  }
-
-  if (SpecialFunctionVec.size() == 0)
-    return {};
-
-  auto TraverseResult = traverseCGToFindSPIRKernels(SpecialFunctionVec);
-
-  if (TraverseResult.has_value())
-    return std::move(*TraverseResult);
-
-  // Here we reached "referenced-indirectly", so we need to find all kernels and
-  // return them.
-  std::vector<StringRef> SPIRKernelNames;
-  for (const Function &F : M) {
-    if (F.getCallingConv() == CallingConv::SPIR_KERNEL)
-      SPIRKernelNames.push_back(F.getName());
-  }
-
-  return SPIRKernelNames;
 }
 
 // Gets 1- to 3-dimension work-group related information for function Func.
@@ -199,14 +118,10 @@ PropSetRegTy computeDeviceLibProperties(const Module &M,
 PropSetRegTy computeModuleProperties(const Module &M,
                                      const EntryPointSet &EntryPoints,
                                      const GlobalBinImageProps &GlobProps,
-                                     bool AllowDeviceImageDependencies) {
+                                     bool AllowDeviceImageDependencies,
+                                     int IdQueriesRange) {
 
   PropSetRegTy PropSet;
-  {
-    uint32_t MRMask = getSYCLDeviceLibReqMask(M);
-    std::map<StringRef, uint32_t> RMEntry = {{"DeviceLibReqMask", MRMask}};
-    PropSet.add(PropSetRegTy::SYCL_DEVICELIB_REQ_MASK, RMEntry);
-  }
   {
     PropSet.add(PropSetRegTy::SYCL_DEVICE_REQUIREMENTS,
                 computeDeviceRequirements(M, EntryPoints).asMap());
@@ -278,12 +193,23 @@ PropSetRegTy computeModuleProperties(const Module &M,
                     /*PropVal=*/true);
       }
     }
+
+    // Export device_global variables.
+    for (auto &GV : M.globals()) {
+      if (!isDeviceGlobalVariable(GV))
+        continue;
+      if (GV.isDeclaration()) // Skip declarations.
+        continue;
+      if (hasDeviceImageScopeProperty(GV)) // Skip per-image globals.
+        continue;
+      if (GV.hasExternalLinkage()) {
+        PropSet.add(PropSetRegTy::SYCL_EXPORTED_SYMBOLS, GV.getName(), true);
+      }
+    }
   }
   if (GlobProps.EmitKernelNames) {
     for (const auto *F : EntryPoints) {
-      if (F->getCallingConv() == CallingConv::SPIR_KERNEL ||
-          F->getCallingConv() == CallingConv::PTX_Kernel ||
-          F->getCallingConv() == CallingConv::AMDGPU_KERNEL) {
+      if (F->hasKernelCallingConv()) {
         PropSet.add(PropSetRegTy::SYCL_KERNEL_NAMES, F->getName(),
                     /*PropVal=*/true);
       }
@@ -312,6 +238,26 @@ PropSetRegTy computeModuleProperties(const Module &M,
         assert(!F.use_empty() && "Function F has no uses");
         PropSet.add(PropSetRegTy::SYCL_IMPORTED_SYMBOLS, F.getName(),
                     /*PropVal=*/true);
+      }
+    }
+
+    // Check for imported device_global variables.
+    for (auto &GV : M.globals()) {
+      if (!GV.isDeclaration())
+        continue;
+      if (!GV.hasExternalLinkage())
+        continue;
+
+      // Check if it's a device_global by type name (declarations don't have
+      // attributes).
+      std::string TypeName;
+      raw_string_ostream(TypeName) << *GV.getValueType();
+
+      if (TypeName.find("device_global") == std::string::npos)
+        continue;
+
+      if (AllowDeviceImageDependencies) {
+        PropSet.add(PropSetRegTy::SYCL_IMPORTED_SYMBOLS, GV.getName(), true);
       }
     }
   }
@@ -385,23 +331,6 @@ PropSetRegTy computeModuleProperties(const Module &M,
   if (SplitType == module_split::SyclEsimdSplitStatus::ESIMD_ONLY)
     PropSet.add(PropSetRegTy::SYCL_MISC_PROP, "isEsimdImage", true);
   {
-    StringRef RegAllocModeAttr = "sycl-register-alloc-mode";
-    uint32_t RegAllocModeVal;
-
-    bool HasRegAllocMode = llvm::any_of(EntryPoints, [&](const Function *F) {
-      if (!F->hasFnAttribute(RegAllocModeAttr))
-        return false;
-      const auto &Attr = F->getFnAttribute(RegAllocModeAttr);
-      RegAllocModeVal = getAttributeAsInteger<uint32_t>(Attr);
-      return true;
-    });
-    if (HasRegAllocMode) {
-      PropSet.add(PropSetRegTy::SYCL_MISC_PROP, RegAllocModeAttr,
-                  RegAllocModeVal);
-    }
-  }
-
-  {
     StringRef GRFSizeAttr = "sycl-grf-size";
     uint32_t GRFSizeVal;
 
@@ -450,11 +379,11 @@ PropSetRegTy computeModuleProperties(const Module &M,
       PropSet.add(PropSetRegTy::SYCL_MISC_PROP, "optLevel", OptLevel);
   }
   {
-    std::vector<StringRef> AssertFuncNames{"__devicelib_assert_fail"};
-    std::vector<StringRef> FuncNames =
-        getKernelNamesUsingSpecialFunctions(M, AssertFuncNames);
-    for (const StringRef &FName : FuncNames)
-      PropSet.add(PropSetRegTy::SYCL_ASSERT_USED, FName, true);
+    // Add device image property only if the image has a non-default
+    // SYCL Id range. The default range is 0 (signed int).
+    if (IdQueriesRange != 0)
+      PropSet.add(PropSetRegTy::SYCL_MISC_PROP, "idQueriesRange",
+                  IdQueriesRange);
   }
   {
     std::vector<std::pair<StringRef, int>> ArgPos =
@@ -462,6 +391,12 @@ PropSetRegTy computeModuleProperties(const Module &M,
     for (const auto &FuncAndArgPos : ArgPos)
       PropSet.add(PropSetRegTy::SYCL_IMPLICIT_LOCAL_ARG, FuncAndArgPos.first,
                   FuncAndArgPos.second);
+  }
+
+  {
+    SmallVector<StringRef> Kernels = getKernelNamesUsingWorkGroupDynamicMem(M);
+    for (const auto &Kernel : Kernels)
+      PropSet.add(PropSetRegTy::SYCL_WORK_GROUP_DYNAMIC_LOCAL_MEM, Kernel, 1);
   }
 
   {
@@ -480,10 +415,6 @@ PropSetRegTy computeModuleProperties(const Module &M,
       PropSet.add(PropSetRegTy::SYCL_DEVICE_GLOBALS, DevGlobalPropertyMap);
   }
 
-  auto HostPipePropertyMap = collectHostPipeProperties(M);
-  if (!HostPipePropertyMap.empty()) {
-    PropSet.add(PropSetRegTy::SYCL_HOST_PIPES, HostPipePropertyMap);
-  }
   bool IsSpecConstantDefault =
       M.getNamedMetadata(
           SpecConstantsPass::SPEC_CONST_DEFAULT_VAL_MODULE_MD_STRING) !=

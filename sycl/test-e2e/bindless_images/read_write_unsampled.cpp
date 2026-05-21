@@ -3,6 +3,9 @@
 // UNSUPPORTED: hip
 // UNSUPPORTED-INTENDED: Returning non fp[32/16] values from sampling fails.
 
+// NOTE: if the test fails on Linux+ARL+L0V2 - the right issue is
+// https://github.com/intel/llvm/issues/21097
+
 // RUN: %{build} -o %t.out
 // RUN: %{run-unfiltered-devices} env NEOReadDebugKeys=1 UseBindlessMode=1 UseExternalAllocatorForSshAndDsh=1 %t.out
 

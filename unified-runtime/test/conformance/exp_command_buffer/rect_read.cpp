@@ -1,6 +1,5 @@
-// Copyright (C) 2025 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include "../enqueue/helpers.h"
@@ -114,7 +113,7 @@ struct urCommandBufferAppendMemBufferReadRectTestWithParam
   ur_mem_handle_t buffer = nullptr;
 };
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urCommandBufferAppendMemBufferReadRectTestWithParam,
     testing::ValuesIn(generateParameterizations()),
     uur::printRectTestString<

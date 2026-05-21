@@ -1,8 +1,7 @@
 #
-# Copyright (C) 2025 Intel Corporation
 #
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 # See YaML.md for syntax definition
@@ -10,7 +9,7 @@
 --- #--------------------------------------------------------------------------
 type: header
 desc: "Intel $OneApi Unified Runtime Experimental API for setting args at kernel launch"
-ordinal: "100"
+ordinal: "11"
 --- #--------------------------------------------------------------------------
 type: enum
 desc: "What kind of kernel arg is this"
@@ -93,7 +92,7 @@ etors:
       value: "0x5000"
 --- #--------------------------------------------------------------------------
 type: function
-desc: "Enqueue a command to execute a kernel"
+desc: "Enqueue a command to execute a kernel and set args at kernel launch time."
 class: $xEnqueue
 name: KernelLaunchWithArgsExp
 ordinal: "0"
@@ -126,12 +125,9 @@ params:
     - type: "const $x_exp_kernel_arg_properties_t*"
       name: pArgs
       desc: "[in][optional][range(0, numArgs)] pointer to a list of kernel arg properties."
-    - type: uint32_t
-      name: numPropsInLaunchPropList
-      desc: "[in] size of the launch prop list"
-    - type: const $x_kernel_launch_property_t*
+    - type: const $x_kernel_launch_ext_properties_t*
       name: launchPropList
-      desc: "[in][optional][range(0, numPropsInLaunchPropList)] pointer to a list of launch properties"
+      desc: "[in][optional] pointer to a single linked list of launch properties"
     - type: uint32_t
       name: numEventsInWaitList
       desc: "[in] size of the event wait list"
@@ -155,9 +151,9 @@ returns:
     - $X_RESULT_ERROR_IN_EVENT_LIST_EXEC_STATUS:
         - "An event in `phEventWaitList` has $X_EVENT_STATUS_ERROR."
     - $X_RESULT_ERROR_INVALID_WORK_DIMENSION:
-        - "`pGlobalWorkSize[0] == 0 || pGlobalWorkSize[1] == 0 || pGlobalWorkSize[2] == 0`"
+        - "`pGlobalWorkSize[0] == 0 || (workDim >= 2 && pGlobalWorkSize[1] == 0) || (workDim >= 3 && pGlobalWorkSize[2] == 0)`"
     - $X_RESULT_ERROR_INVALID_WORK_GROUP_SIZE:
-        - "`pLocalWorkSize && (pLocalWorkSize[0] == 0 || pLocalWorkSize[1] == 0 || pLocalWorkSize[2] == 0)`"
+        - "`pLocalWorkSize && (pLocalWorkSize[0] == 0 || (workDim >= 2 && pLocalWorkSize[1] == 0) || (workDim >= 3 && pLocalWorkSize[2] == 0))`"
     - $X_RESULT_ERROR_INVALID_VALUE
     - $X_RESULT_ERROR_INVALID_KERNEL_ARGS
         - "The kernel argument values have not been specified."
@@ -166,5 +162,4 @@ returns:
     - $X_RESULT_ERROR_INVALID_OPERATION:
         - "If any property in `launchPropList` isn't supported by the device."
     - $X_RESULT_ERROR_INVALID_NULL_POINTER:
-        - "`launchPropList == NULL && numPropsInLaunchPropList > 0`"
         - "`pArgs == NULL && numArgs > 0`"

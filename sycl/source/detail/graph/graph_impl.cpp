@@ -19,6 +19,7 @@
 #include <detail/program_manager/program_manager.hpp> // ProgramManager
 #include <detail/queue_impl.hpp>                      // for queue_impl
 #include <detail/sycl_mem_obj_t.hpp>                  // for SYCLMemObjT
+#include <detail/ur.hpp>                              // for UR APIs
 #include <stack>                                      // for stack
 #include <sycl/detail/common.hpp>      // for tls_code_loc_t etc..
 #include <sycl/detail/kernel_desc.hpp> // for kernel_param_kind_t
@@ -313,6 +314,40 @@ graph_impl::graph_impl(const sycl::context &SyclContext,
   if (PropList.has_property<property::graph::assume_buffer_outlives_graph>()) {
     MAllowBuffers = true;
   }
+  if (PropList.has_property<property::graph::enable_native_recording>()) {
+    // Create native UR graph when native recording is enabled
+    // Note: Native recording only works with immediate command lists,
+    // this is validated when recording begins
+    context_impl &ContextImpl = *sycl::detail::getSyclObjImpl(MContext);
+    sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+
+    // Check if the device supports graph record and replay
+    sycl::detail::device_impl &DeviceImpl =
+        *sycl::detail::getSyclObjImpl(MDevice);
+
+    ur_bool_t SupportsGraphRecordReplay = false;
+    ur_result_t Result =
+        Adapter.call_nocheck<sycl::detail::UrApiKind::urDeviceGetInfo>(
+            DeviceImpl.getHandleRef(),
+            UR_DEVICE_INFO_GRAPH_RECORD_AND_REPLAY_SUPPORT_EXP,
+            sizeof(ur_bool_t), &SupportsGraphRecordReplay, nullptr);
+    if (Result != UR_RESULT_SUCCESS || !SupportsGraphRecordReplay) {
+      throw sycl::exception(
+          sycl::make_error_code(errc::invalid),
+          "Device does not support graph record and replay feature "
+          "(UR_DEVICE_INFO_GRAPH_RECORD_AND_REPLAY_SUPPORT_EXP).");
+    }
+
+    Result = Adapter.call_nocheck<sycl::detail::UrApiKind::urGraphCreateExp>(
+        ContextImpl.getHandleRef(), &MNativeGraphHandle);
+    if (Result != UR_RESULT_SUCCESS) {
+      throw sycl::exception(sycl::make_error_code(errc::runtime),
+                            "Failed to create native UR graph");
+    }
+    assert(MNativeGraphHandle != nullptr &&
+           "Native UR graph handle should not be null if graph creation "
+           "succeeded");
+  }
 
   if (!SyclDevice.has(aspect::ext_oneapi_limited_graph) &&
       !SyclDevice.has(aspect::ext_oneapi_graph)) {
@@ -327,9 +362,25 @@ graph_impl::graph_impl(const sycl::context &SyclContext,
 
 graph_impl::~graph_impl() {
   try {
-    clearQueues();
+    clearQueues(false /*Needs lock*/);
     for (auto &MemObj : MMemObjs) {
       MemObj->markNoLongerBeingUsedInGraph();
+    }
+    // Clean up native UR graph if it was created
+    if (MNativeGraphHandle) {
+      context_impl &ContextImpl = *sycl::detail::getSyclObjImpl(MContext);
+      sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+
+      ContextImpl.deregisterNativeGraph(MNativeGraphHandle);
+
+      ur_result_t Result =
+          Adapter.call_nocheck<sycl::detail::UrApiKind::urGraphDestroyExp>(
+              MNativeGraphHandle);
+      if (Result != UR_RESULT_SUCCESS) {
+        throw sycl::exception(sycl::make_error_code(errc::runtime),
+                              "Failed to destroy native UR graph");
+      }
+      MNativeGraphHandle = nullptr;
     }
   } catch (std::exception &e) {
     __SYCL_REPORT_EXCEPTION_TO_STREAM("exception in ~graph_impl", e);
@@ -403,6 +454,14 @@ void graph_impl::markCGMemObjs(
 }
 
 node_impl &graph_impl::add(nodes_range Deps) {
+  // Native recording limitation: explicit API not supported
+  if (MNativeGraphHandle) {
+    throw sycl::exception(
+        make_error_code(errc::feature_not_supported),
+        "graph.add(): The explicit graph API is not supported in native "
+        "recording mode. Use the record-and-replay API instead.");
+  }
+
   node_impl &NodeImpl = createNode();
 
   addDepsToNode(NodeImpl, Deps);
@@ -415,13 +474,17 @@ node_impl &graph_impl::add(nodes_range Deps) {
 node_impl &graph_impl::add(std::function<void(handler &)> CGF,
                            const std::vector<sycl::detail::ArgDesc> &Args,
                            nodes_range Deps) {
+  // Native recording limitation: explicit API not supported
+  if (MNativeGraphHandle) {
+    throw sycl::exception(
+        make_error_code(errc::feature_not_supported),
+        "graph.add(): The explicit graph API is not supported in native "
+        "recording mode. Use the record-and-replay API instead.");
+  }
+
   (void)Args;
-#ifdef __INTEL_PREVIEW_BREAKING_CHANGES
   detail::handler_impl HandlerImpl{*this};
   sycl::handler Handler{HandlerImpl};
-#else
-  sycl::handler Handler{shared_from_this()};
-#endif
 
   // Pass the node deps to the handler so they are available when processing the
   // CGF, need for async_malloc nodes.
@@ -489,6 +552,13 @@ node_impl &graph_impl::add(std::function<void(handler &)> CGF,
 node_impl &graph_impl::add(node_type NodeType,
                            std::shared_ptr<sycl::detail::CG> CommandGroup,
                            nodes_range Deps) {
+  // Native recording limitation: explicit API not supported
+  if (MNativeGraphHandle) {
+    throw sycl::exception(
+        make_error_code(errc::feature_not_supported),
+        "graph.add(): The explicit graph API is not supported in native "
+        "recording mode. Use the record-and-replay API instead.");
+  }
 
   // A unique set of dependencies obtained by checking requirements and events
   std::set<node_impl *> UniqueDeps = getCGEdges(CommandGroup);
@@ -516,6 +586,14 @@ node_impl &graph_impl::add(node_type NodeType,
 node_impl &
 graph_impl::add(std::shared_ptr<dynamic_command_group_impl> &DynCGImpl,
                 nodes_range Deps) {
+  // Native recording limitation: explicit API not supported
+  if (MNativeGraphHandle) {
+    throw sycl::exception(
+        make_error_code(errc::feature_not_supported),
+        "graph.add(): The explicit graph API is not supported in native "
+        "recording mode. Use the record-and-replay API instead.");
+  }
+
   // Set of Dependent nodes based on CG event and accessor dependencies.
   std::set<node_impl *> DynCGDeps = getCGEdges(DynCGImpl->MCommandGroups[0]);
   for (unsigned i = 1; i < DynCGImpl->getNumCGs(); i++) {
@@ -549,32 +627,74 @@ graph_impl::add(std::shared_ptr<dynamic_command_group_impl> &DynCGImpl,
   return NodeImpl;
 }
 
-std::shared_ptr<sycl::detail::queue_impl> graph_impl::getQueue() const {
-  std::shared_ptr<sycl::detail::queue_impl> Return{};
-  if (!MRecordingQueues.empty())
-    Return = MRecordingQueues.begin()->lock();
-  return Return;
+std::shared_ptr<sycl::detail::queue_impl>
+graph_impl::getLastRecordedQueue() const {
+  return MLastRecordedQueue.lock();
 }
 
 void graph_impl::addQueue(sycl::detail::queue_impl &RecordingQueue) {
-  MRecordingQueues.insert(RecordingQueue.weak_from_this());
+  MLastRecordedQueue = RecordingQueue.weak_from_this();
+  MRecordingQueues.insert(MLastRecordedQueue);
 }
 
 void graph_impl::removeQueue(sycl::detail::queue_impl &RecordingQueue) {
   MRecordingQueues.erase(RecordingQueue.weak_from_this());
 }
 
-bool graph_impl::clearQueues() {
-  bool AnyQueuesCleared = false;
-  for (auto &Queue : MRecordingQueues) {
+bool graph_impl::isQueueRecording(sycl::detail::queue_impl &Queue) {
+
+  return MRecordingQueues.count(Queue.weak_from_this()) > 0;
+}
+
+void graph_impl::clearQueues(bool NeedsLock) {
+  graph_impl::RecQueuesStorage SwappedQueues;
+  {
+    graph_impl::WriteLock Guard(MMutex, std::defer_lock);
+    if (NeedsLock) {
+      Guard.lock();
+    }
+    std::swap(MRecordingQueues, SwappedQueues);
+  }
+
+  for (auto &Queue : SwappedQueues) {
     if (auto ValidQueue = Queue.lock(); ValidQueue) {
-      ValidQueue->setCommandGraph(nullptr);
-      AnyQueuesCleared = true;
+      if (MNativeGraphHandle) {
+        // End native UR graph capture
+        auto UrQueue = ValidQueue->getHandleRef();
+        ur_exp_graph_handle_t CapturedGraph = nullptr;
+        context_impl &ContextImpl = *sycl::detail::getSyclObjImpl(MContext);
+        sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+        ur_result_t Result = Adapter.call_nocheck<
+            sycl::detail::UrApiKind::urQueueEndGraphCaptureExp>(UrQueue,
+                                                                &CapturedGraph);
+        if (Result != UR_RESULT_SUCCESS) {
+          throw sycl::exception(sycl::make_error_code(errc::runtime),
+                                "Failed to end native graph capture");
+        }
+        // CapturedGraph should be the same as MNativeGraphHandle
+      } else {
+        // Only call setCommandGraph for traditional recording
+        ValidQueue->setCommandGraph(nullptr);
+      }
     }
   }
-  MRecordingQueues.clear();
+}
 
-  return AnyQueuesCleared;
+bool graph_impl::empty() const {
+
+  if (!MNativeGraphHandle) {
+    return MNodeStorage.empty();
+  }
+
+  bool IsEmptyResult = true;
+  if (getSyclObjImpl(MContext)
+          ->getAdapter()
+          .call_nocheck<UrApiKind::urGraphIsEmptyExp>(
+              MNativeGraphHandle, &IsEmptyResult) != UR_RESULT_SUCCESS) {
+    throw sycl::exception(sycl::make_error_code(errc::runtime),
+                          "Failed to check if graph is empty");
+  }
+  return IsEmptyResult;
 }
 
 bool graph_impl::checkForCycles() {
@@ -690,20 +810,61 @@ std::vector<sycl::detail::EventImplPtr> graph_impl::getExitNodesEvents(
   return Events;
 }
 
-void graph_impl::beginRecordingUnlockedQueue(sycl::detail::queue_impl &Queue) {
+void graph_impl::beginRecordingImpl(sycl::detail::queue_impl &Queue,
+                                    bool AcquireQueueLock) {
   graph_impl::WriteLock Lock(MMutex);
+
+  // Native recording limitation: single queue at a time
+  if (MNativeGraphHandle && !MRecordingQueues.empty()) {
+    throw sycl::exception(make_error_code(errc::feature_not_supported),
+                          "Recording the same graph to multiple queues is not "
+                          "supported in native mode");
+  }
+
+  // Native recording limitation: in-order queues only
+  if (MNativeGraphHandle && !Queue.isInOrder()) {
+    throw sycl::exception(make_error_code(errc::feature_not_supported),
+                          "Native recording only works with in-order queues");
+  }
+
   if (!Queue.hasCommandGraph()) {
-    Queue.setCommandGraphUnlocked(shared_from_this());
+
+    // Use native UR graph recording if enabled
+    if (MNativeGraphHandle) {
+      auto UrQueue = Queue.getHandleRef();
+      context_impl &ContextImpl = *sycl::detail::getSyclObjImpl(MContext);
+      sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+
+      if (Queue.isNativeRecording()) {
+        throw sycl::exception(sycl::make_error_code(errc::invalid),
+                              "Queue is already in native graph capture mode");
+      }
+
+      ur_result_t Result = Adapter.call_nocheck<
+          sycl::detail::UrApiKind::urQueueBeginCaptureIntoGraphExp>(
+          UrQueue, MNativeGraphHandle);
+      if (Result != UR_RESULT_SUCCESS) {
+        throw sycl::exception(sycl::make_error_code(errc::runtime),
+                              "Failed to begin native UR graph capture");
+      }
+    } else {
+      // Non-native recording path
+      if (AcquireQueueLock) {
+        Queue.setCommandGraph(shared_from_this());
+      } else {
+        Queue.setCommandGraphUnlocked(shared_from_this());
+      }
+    }
     addQueue(Queue);
   }
 }
 
+void graph_impl::beginRecordingUnlockedQueue(sycl::detail::queue_impl &Queue) {
+  beginRecordingImpl(Queue, /*AcquireQueueLock=*/false);
+}
+
 void graph_impl::beginRecording(sycl::detail::queue_impl &Queue) {
-  graph_impl::WriteLock Lock(MMutex);
-  if (!Queue.hasCommandGraph()) {
-    Queue.setCommandGraph(shared_from_this());
-    addQueue(Queue);
-  }
+  beginRecordingImpl(Queue, /*AcquireQueueLock=*/true);
 }
 
 // Check if nodes do not require enqueueing and if so loop back through
@@ -929,16 +1090,35 @@ exec_graph_impl::exec_graph_impl(sycl::context Context,
                             "Device does not support Command Graph update");
     }
   }
-  // Copy nodes from GraphImpl and merge any subgraph nodes into this graph.
-  duplicateNodes();
 
-  if (auto PlaceholderQueuePtr = GraphImpl->getQueue()) {
-    MQueueImpl = std::move(PlaceholderQueuePtr);
+  // Create native UR executable graph if the modifiable graph uses native
+  // recording
+  if (isNativeRecordingEnabledForGraph(*GraphImpl)) {
+    context_impl &ContextImpl = *sycl::detail::getSyclObjImpl(MContext);
+    sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+    ur_result_t Result =
+        Adapter
+            .call_nocheck<sycl::detail::UrApiKind::urGraphInstantiateGraphExp>(
+                GraphImpl->getNativeGraphHandle(),
+                &MNativeExecutableGraphHandle);
+    if (Result != UR_RESULT_SUCCESS) {
+      throw sycl::exception(sycl::make_error_code(errc::runtime),
+                            "Failed to instantiate native UR executable graph");
+    }
   } else {
-    MQueueImpl = sycl::detail::queue_impl::create(
-        *sycl::detail::getSyclObjImpl(GraphImpl->getDevice()),
-        *sycl::detail::getSyclObjImpl(Context), sycl::async_handler{},
-        sycl::property_list{});
+    // Copy nodes from GraphImpl and merge any subgraph nodes into this graph.
+    duplicateNodes();
+
+    // A placeholder queue is only required for enqueueNode and update
+    // operations which are only possible with the command buffer path.
+    if (auto PlaceholderQueuePtr = GraphImpl->getLastRecordedQueue()) {
+      MQueueImpl = std::move(PlaceholderQueuePtr);
+    } else {
+      MQueueImpl = sycl::detail::queue_impl::create(
+          *sycl::detail::getSyclObjImpl(GraphImpl->getDevice()),
+          *sycl::detail::getSyclObjImpl(Context), sycl::async_handler{},
+          sycl::property_list{});
+    }
   }
 }
 
@@ -949,6 +1129,16 @@ exec_graph_impl::~exec_graph_impl() {
     sycl::detail::adapter_impl &Adapter =
         sycl::detail::getSyclObjImpl(MContext)->getAdapter();
     MSchedule.clear();
+
+    // Clean up native UR executable graph if it was created
+    if (MNativeExecutableGraphHandle) {
+      ur_result_t Res = Adapter.call_nocheck<
+          sycl::detail::UrApiKind::urGraphExecutableGraphDestroyExp>(
+          MNativeExecutableGraphHandle);
+      if (Res == UR_RESULT_SUCCESS) {
+        MNativeExecutableGraphHandle = nullptr;
+      }
+    }
 
     // Clean up any graph-owned allocations that were allocated
     MGraphImpl->getMemPool().deallocateAndUnmapAll();
@@ -1205,27 +1395,73 @@ exec_graph_impl::enqueuePartitions(sycl::detail::queue_impl &Queue,
 }
 
 EventImplPtr
+exec_graph_impl::enqueueNative(sycl::detail::queue_impl &Queue,
+                               sycl::detail::CG::StorageInitHelper CGData,
+                               bool EventNeeded) {
+  // Create a list containing all the UR event handles in WaitEvents.
+  // WaitEvents is assumed to be safe for scheduler bypass and any
+  // host-task events that it contains can be ignored.
+  auto &WaitEvents = CGData.MEvents;
+  std::vector<ur_event_handle_t> UrEventHandles{};
+  UrEventHandles.reserve(WaitEvents.size());
+  for (auto &SyclWaitEvent : WaitEvents) {
+    if (auto URHandle = SyclWaitEvent->getHandle()) {
+      UrEventHandles.push_back(URHandle);
+    }
+  }
+
+  const size_t UrEnqueueWaitListSize = UrEventHandles.size();
+  ur_event_handle_t *UrEnqueueWaitList =
+      UrEnqueueWaitListSize == 0 ? nullptr : UrEventHandles.data();
+  EventImplPtr NewEvent = nullptr;
+  if (!EventNeeded) {
+    Queue.getAdapter().call<sycl::detail::UrApiKind::urEnqueueGraphExp>(
+        Queue.getHandleRef(), MNativeExecutableGraphHandle,
+        UrEnqueueWaitListSize, UrEnqueueWaitList, nullptr);
+  } else {
+    NewEvent = sycl::detail::event_impl::create_device_event(Queue);
+    NewEvent->setContextImpl(Queue.getContextImpl());
+    NewEvent->setStateIncomplete();
+    NewEvent->setSubmissionTime();
+    ur_event_handle_t UrEvent = nullptr;
+    Queue.getAdapter().call<sycl::detail::UrApiKind::urEnqueueGraphExp>(
+        Queue.getHandleRef(), MNativeExecutableGraphHandle,
+        UrEnqueueWaitListSize, UrEnqueueWaitList, &UrEvent);
+    NewEvent->setHandle(UrEvent);
+    NewEvent->setEventFromSubmittedExecCommandBuffer(true);
+    if (MEnableProfiling) {
+      NewEvent->setProfilingEnabled(MEnableProfiling);
+    }
+  }
+  return NewEvent;
+}
+
+std::pair<EventImplPtr, bool>
 exec_graph_impl::enqueue(sycl::detail::queue_impl &Queue,
                          sycl::detail::CG::StorageInitHelper CGData,
                          bool EventNeeded) {
   WriteLock Lock(MMutex);
+  // Use native recording path if available
+  if (MNativeExecutableGraphHandle) {
+    return {enqueueNative(Queue, std::move(CGData), EventNeeded),
+            /*SkipScheduler=*/true};
+  }
 
+  // Command buffer path
   cleanupExecutionEvents(MSchedulerDependencies);
   CGData.MEvents.insert(CGData.MEvents.end(), MSchedulerDependencies.begin(),
                         MSchedulerDependencies.end());
-
   bool IsCGDataSafeForSchedulerBypass =
       detail::Scheduler::areEventsSafeForSchedulerBypass(
           CGData.MEvents, Queue.getContextImpl()) &&
       CGData.MRequirements.empty();
+  bool SkipScheduler = IsCGDataSafeForSchedulerBypass && !MContainsHostTask;
 
   // This variable represents the returned event. It will always be nullptr if
   // EventNeeded is false.
   EventImplPtr SignalEvent;
-
   if (!MContainsHostTask) {
-    bool SkipScheduler =
-        IsCGDataSafeForSchedulerBypass && MPartitions[0]->MRequirements.empty();
+    SkipScheduler = SkipScheduler && MPartitions[0]->MRequirements.empty();
     if (SkipScheduler) {
       SignalEvent = enqueuePartitionDirectly(MPartitions[0], Queue,
                                              CGData.MEvents, EventNeeded);
@@ -1258,19 +1494,26 @@ exec_graph_impl::enqueue(sycl::detail::queue_impl &Queue,
     SignalEvent->setProfilingEnabled(MEnableProfiling);
   }
 
-  return SignalEvent;
+  return {SignalEvent, SkipScheduler};
 }
 
 void exec_graph_impl::duplicateNodes() {
   // Map of original modifiable nodes (keys) to new duplicated nodes (values)
-  std::map<node_impl *, node_impl *> NodesMap;
-
+  std::unordered_map<node_impl *, node_impl *> NodesMap;
   nodes_range ModifiableNodes{MGraphImpl->MNodeStorage};
-  std::deque<std::shared_ptr<node_impl>> NewNodes;
+  std::vector<std::shared_ptr<node_impl>> NewNodes;
+
+  const size_t NodeCount = ModifiableNodes.size();
+  NodesMap.reserve(NodeCount);
+  NewNodes.reserve(NodeCount);
+
+  bool foundSubgraph = false;
 
   for (node_impl &OriginalNode : ModifiableNodes) {
     NewNodes.push_back(std::make_shared<node_impl>(OriginalNode));
     node_impl &NodeCopy = *NewNodes.back();
+
+    foundSubgraph |= (NodeCopy.MNodeType == node_type::subgraph);
 
     // Associate the ID of the original node with the node copy for later quick
     // access
@@ -1300,113 +1543,117 @@ void exec_graph_impl::duplicateNodes() {
 
   // Subgraph nodes need special handling, we extract all subgraph nodes and
   // merge them into the main node list
-
-  for (auto NewNodeIt = NewNodes.rbegin(); NewNodeIt != NewNodes.rend();
-       ++NewNodeIt) {
-    auto NewNode = *NewNodeIt;
-    if (NewNode->MNodeType != node_type::subgraph) {
-      continue;
-    }
-    nodes_range SubgraphNodes{NewNode->MSubGraphImpl->MNodeStorage};
-    std::deque<std::shared_ptr<node_impl>> NewSubgraphNodes{};
-
-    // Map of original subgraph nodes (keys) to new duplicated nodes (values)
-    std::map<node_impl *, node_impl *> SubgraphNodesMap;
-
-    // Copy subgraph nodes
-    for (node_impl &SubgraphNode : SubgraphNodes) {
-      NewSubgraphNodes.push_back(std::make_shared<node_impl>(SubgraphNode));
-      node_impl &NodeCopy = *NewSubgraphNodes.back();
-      // Associate the ID of the original subgraph node with all extracted node
-      // copies for future quick access.
-      MIDCache.insert(std::make_pair(SubgraphNode.MID, &NodeCopy));
-
-      SubgraphNodesMap.insert({&SubgraphNode, &NodeCopy});
-      NodeCopy.MSuccessors.clear();
-      NodeCopy.MPredecessors.clear();
-    }
-
-    // Rebuild edges for new subgraph nodes
-    auto OrigIt = SubgraphNodes.begin(), OrigEnd = SubgraphNodes.end();
-    for (auto NewIt = NewSubgraphNodes.begin(); OrigIt != OrigEnd;
-         ++OrigIt, ++NewIt) {
-      node_impl &SubgraphNode = *OrigIt;
-      node_impl &NodeCopy = **NewIt;
-
-      for (node_impl &NextNode : SubgraphNode.successors()) {
-        node_impl &Successor = *SubgraphNodesMap.at(&NextNode);
-        NodeCopy.registerSuccessor(Successor);
+  if (foundSubgraph) {
+    for (auto NewNodeIt = NewNodes.rbegin(); NewNodeIt != NewNodes.rend();
+         ++NewNodeIt) {
+      auto NewNode = *NewNodeIt;
+      if (NewNode->MNodeType != node_type::subgraph) {
+        continue;
       }
-    }
+      nodes_range SubgraphNodes{NewNode->MSubGraphImpl->MNodeStorage};
+      std::deque<std::shared_ptr<node_impl>> NewSubgraphNodes{};
 
-    // Collect input and output nodes for the subgraph
-    std::vector<node_impl *> Inputs;
-    std::vector<node_impl *> Outputs;
-    for (std::shared_ptr<node_impl> &NodeImpl : NewSubgraphNodes) {
-      if (NodeImpl->MPredecessors.size() == 0) {
-        Inputs.push_back(&*NodeImpl);
+      // Map of original subgraph nodes (keys) to new duplicated nodes (values)
+      std::map<node_impl *, node_impl *> SubgraphNodesMap;
+
+      // Copy subgraph nodes
+      for (node_impl &SubgraphNode : SubgraphNodes) {
+        NewSubgraphNodes.push_back(std::make_shared<node_impl>(SubgraphNode));
+        node_impl &NodeCopy = *NewSubgraphNodes.back();
+        // Associate the ID of the original subgraph node with all extracted
+        // node copies for future quick access.
+        MIDCache.insert(std::make_pair(SubgraphNode.MID, &NodeCopy));
+
+        SubgraphNodesMap.insert({&SubgraphNode, &NodeCopy});
+        NodeCopy.MSuccessors.clear();
+        NodeCopy.MPredecessors.clear();
       }
-      if (NodeImpl->MSuccessors.size() == 0) {
-        Outputs.push_back(&*NodeImpl);
+
+      // Rebuild edges for new subgraph nodes
+      auto OrigIt = SubgraphNodes.begin(), OrigEnd = SubgraphNodes.end();
+      for (auto NewIt = NewSubgraphNodes.begin(); OrigIt != OrigEnd;
+           ++OrigIt, ++NewIt) {
+        node_impl &SubgraphNode = *OrigIt;
+        node_impl &NodeCopy = **NewIt;
+
+        for (node_impl &NextNode : SubgraphNode.successors()) {
+          node_impl &Successor = *SubgraphNodesMap.at(&NextNode);
+          NodeCopy.registerSuccessor(Successor);
+        }
       }
-    }
 
-    // Update the predecessors and successors of the nodes which reference the
-    // original subgraph node
-
-    // Predecessors
-    for (node_impl &PredNode : NewNode->predecessors()) {
-      auto &Successors = PredNode.MSuccessors;
-
-      // Remove the subgraph node from this nodes successors
-      Successors.erase(
-          std::remove(Successors.begin(), Successors.end(), NewNode.get()),
-          Successors.end());
-
-      // Add all input nodes from the subgraph as successors for this node
-      // instead
-      for (node_impl *Input : Inputs) {
-        PredNode.registerSuccessor(*Input);
+      // Collect input and output nodes for the subgraph
+      std::vector<node_impl *> Inputs;
+      std::vector<node_impl *> Outputs;
+      for (std::shared_ptr<node_impl> &NodeImpl : NewSubgraphNodes) {
+        if (NodeImpl->MPredecessors.size() == 0) {
+          Inputs.push_back(&*NodeImpl);
+        }
+        if (NodeImpl->MSuccessors.size() == 0) {
+          Outputs.push_back(&*NodeImpl);
+        }
       }
-    }
 
-    // Successors
-    for (node_impl &SuccNode : NewNode->successors()) {
-      auto &Predecessors = SuccNode.MPredecessors;
+      // Update the predecessors and successors of the nodes which reference the
+      // original subgraph node
 
-      // Remove the subgraph node from this nodes successors
-      Predecessors.erase(
-          std::remove(Predecessors.begin(), Predecessors.end(), NewNode.get()),
-          Predecessors.end());
+      // Predecessors
+      for (node_impl &PredNode : NewNode->predecessors()) {
+        auto &Successors = PredNode.MSuccessors;
 
-      // Add all Output nodes from the subgraph as predecessors for this node
-      // instead
-      for (node_impl *Output : Outputs) {
-        Output->registerSuccessor(SuccNode);
+        // Remove the subgraph node from this nodes successors
+        Successors.erase(
+            std::remove(Successors.begin(), Successors.end(), NewNode.get()),
+            Successors.end());
+
+        // Add all input nodes from the subgraph as successors for this node
+        // instead
+        for (node_impl *Input : Inputs) {
+          PredNode.registerSuccessor(*Input);
+        }
       }
-    }
 
-    // Remove single subgraph node and add all new individual subgraph nodes
-    // to the node storage in its place
-    auto OldPositionIt =
-        NewNodes.erase(std::find(NewNodes.begin(), NewNodes.end(), NewNode));
-    // Also set the iterator to the newly added nodes so we can continue
-    // iterating over all remaining nodes
-    auto InsertIt = NewNodes.insert(
-        OldPositionIt, std::make_move_iterator(NewSubgraphNodes.begin()),
-        std::make_move_iterator(NewSubgraphNodes.end()));
-    // Since the new reverse_iterator will be at i - 1 we need to advance it
-    // when constructing
-    NewNodeIt = std::make_reverse_iterator(std::next(InsertIt));
+      // Successors
+      for (node_impl &SuccNode : NewNode->successors()) {
+        auto &Predecessors = SuccNode.MPredecessors;
+
+        // Remove the subgraph node from this nodes successors
+        Predecessors.erase(std::remove(Predecessors.begin(), Predecessors.end(),
+                                       NewNode.get()),
+                           Predecessors.end());
+
+        // Add all Output nodes from the subgraph as predecessors for this node
+        // instead
+        for (node_impl *Output : Outputs) {
+          Output->registerSuccessor(SuccNode);
+        }
+      }
+
+      // Remove single subgraph node and add all new individual subgraph nodes
+      // to the node storage in its place
+      auto OldPositionIt =
+          NewNodes.erase(std::find(NewNodes.begin(), NewNodes.end(), NewNode));
+      // Also set the iterator to the newly added nodes so we can continue
+      // iterating over all remaining nodes
+      auto InsertIt = NewNodes.insert(
+          OldPositionIt, std::make_move_iterator(NewSubgraphNodes.begin()),
+          std::make_move_iterator(NewSubgraphNodes.end()));
+      // Since the new reverse_iterator will be at i - 1 we need to advance it
+      // when constructing
+      NewNodeIt = std::make_reverse_iterator(std::next(InsertIt));
+    }
   }
 
   // Store all the new nodes locally
-  MNodeStorage.insert(MNodeStorage.begin(),
-                      std::make_move_iterator(NewNodes.begin()),
-                      std::make_move_iterator(NewNodes.end()));
+  MNodeStorage = std::move(NewNodes);
 }
 
 void exec_graph_impl::update(std::shared_ptr<graph_impl> GraphImpl) {
+  if (MNativeExecutableGraphHandle) {
+    throw sycl::exception(
+        sycl::make_error_code(errc::feature_not_supported),
+        "Graph update is not supported in native recording mode");
+  }
 
   if (MDevice != GraphImpl->getDevice()) {
     throw sycl::exception(
@@ -1479,6 +1726,11 @@ void exec_graph_impl::update(node_impl &Node) {
 }
 
 void exec_graph_impl::update(nodes_range Nodes) {
+  if (MNativeExecutableGraphHandle) {
+    throw sycl::exception(
+        sycl::make_error_code(errc::feature_not_supported),
+        "Graph update is not supported in native recording mode");
+  }
   if (!MIsUpdatable) {
     throw sycl::exception(sycl::make_error_code(errc::invalid),
                           "update() cannot be called on a executable graph "
@@ -1845,18 +2097,33 @@ modifiable_command_graph::modifiable_command_graph(
     const sycl::context &SyclContext, const sycl::device &SyclDevice,
     const sycl::property_list &PropList)
     : impl(std::make_shared<detail::graph_impl>(SyclContext, SyclDevice,
-                                                PropList)) {}
+                                                PropList)) {
+  if (auto UrNativeHandle = impl->getNativeGraphHandle()) {
+    auto &ContextImpl = *sycl::detail::getSyclObjImpl(SyclContext);
+    ContextImpl.registerNativeGraph(UrNativeHandle, impl);
+  }
+}
 
 modifiable_command_graph::modifiable_command_graph(
     const sycl::queue &SyclQueue, const sycl::property_list &PropList)
     : impl(std::make_shared<detail::graph_impl>(
-          SyclQueue.get_context(), SyclQueue.get_device(), PropList)) {}
+          SyclQueue.get_context(), SyclQueue.get_device(), PropList)) {
+  if (auto UrNativeHandle = impl->getNativeGraphHandle()) {
+    auto &ContextImpl = *sycl::detail::getSyclObjImpl(SyclQueue.get_context());
+    ContextImpl.registerNativeGraph(UrNativeHandle, impl);
+  }
+}
 
 modifiable_command_graph::modifiable_command_graph(
     const sycl::device &SyclDevice, const sycl::property_list &PropList)
     : impl(std::make_shared<detail::graph_impl>(
           SyclDevice.get_platform().khr_get_default_context(), SyclDevice,
-          PropList)) {}
+          PropList)) {
+  if (auto UrNativeHandle = impl->getNativeGraphHandle()) {
+    auto &ContextImpl = *sycl::detail::getSyclObjImpl(impl->getContext());
+    ContextImpl.registerNativeGraph(UrNativeHandle, impl);
+  }
+}
 
 node modifiable_command_graph::addImpl(dynamic_command_group &DynCGF,
                                        const std::vector<node> &Deps) {
@@ -1964,18 +2231,52 @@ void modifiable_command_graph::begin_recording(
 }
 
 void modifiable_command_graph::end_recording() {
-  graph_impl::WriteLock Lock(impl->MMutex);
-  impl->clearQueues();
+  impl->clearQueues(true /*Needs lock*/);
 }
 
 void modifiable_command_graph::end_recording(queue &RecordingQueue) {
   queue_impl &QueueImpl = *sycl::detail::getSyclObjImpl(RecordingQueue);
-  if (QueueImpl.getCommandGraph() == impl) {
-    QueueImpl.setCommandGraph(nullptr);
+
+  // Check if this queue is recording to this graph
+  bool IsRecordingToThisGraph = false;
+
+  if (isNativeRecordingEnabledForGraph(*impl)) {
+    // For native recording, check if queue is in our recording queue list
     graph_impl::WriteLock Lock(impl->MMutex);
-    impl->removeQueue(QueueImpl);
+    IsRecordingToThisGraph = impl->isQueueRecording(QueueImpl);
+
+    if (IsRecordingToThisGraph) {
+      // End native UR graph capture
+      assert(impl->getNativeGraphHandle() &&
+             "Native graph handle must be valid when ending native recording");
+      auto UrQueue = QueueImpl.getHandleRef();
+      ur_exp_graph_handle_t CapturedGraph = nullptr;
+      context_impl &ContextImpl =
+          *sycl::detail::getSyclObjImpl(impl->getContext());
+      sycl::detail::adapter_impl &Adapter = ContextImpl.getAdapter();
+      ur_result_t Result =
+          Adapter
+              .call_nocheck<sycl::detail::UrApiKind::urQueueEndGraphCaptureExp>(
+                  UrQueue, &CapturedGraph);
+      if (Result != UR_RESULT_SUCCESS) {
+        throw sycl::exception(sycl::make_error_code(errc::runtime),
+                              "Failed to end native UR graph capture");
+      }
+      assert(CapturedGraph == impl->getNativeGraphHandle() &&
+             "Captured graph handle must match the graph's native handle");
+      impl->removeQueue(QueueImpl);
+    }
+  } else {
+    // Traditional recording path
+    if (QueueImpl.getCommandGraph() == impl) {
+      QueueImpl.setCommandGraph(nullptr);
+      graph_impl::WriteLock Lock(impl->MMutex);
+      impl->removeQueue(QueueImpl);
+      IsRecordingToThisGraph = true;
+    }
   }
-  if (QueueImpl.hasCommandGraph())
+
+  if (QueueImpl.hasCommandGraph() && !IsRecordingToThisGraph)
     throw sycl::exception(sycl::make_error_code(errc::invalid),
                           "end_recording called for a queue which is recording "
                           "to a different graph.");
@@ -2003,11 +2304,28 @@ void modifiable_command_graph::print_graph(sycl::detail::string_view pathstr,
 
 std::vector<node> modifiable_command_graph::get_nodes() const {
   graph_impl::ReadLock Lock(impl->MMutex);
+  if (impl->getNativeGraphHandle()) {
+    throw sycl::exception(
+        sycl::make_error_code(errc::invalid),
+        "get_nodes() is not supported for graphs created with the "
+        "enable_native_recording property.");
+  }
   return impl->nodes().to<std::vector<node>>();
 }
 std::vector<node> modifiable_command_graph::get_root_nodes() const {
   graph_impl::ReadLock Lock(impl->MMutex);
+  if (impl->getNativeGraphHandle()) {
+    throw sycl::exception(
+        sycl::make_error_code(errc::invalid),
+        "get_root_nodes() is not supported for graphs created with the "
+        "enable_native_recording property.");
+  }
   return impl->roots().to<std::vector<node>>();
+}
+
+bool modifiable_command_graph::empty() const {
+  graph_impl::ReadLock Lock(impl->MMutex);
+  return impl->empty();
 }
 
 void modifiable_command_graph::checkNodePropertiesAndThrow(
@@ -2048,18 +2366,22 @@ executable_command_graph::executable_command_graph(
 }
 
 void executable_command_graph::finalizeImpl() {
-  impl->makePartitions();
+  // Partitions and command buffers are not used for native recording and
+  // instantiation is fully performed in the exec_graph_impl constructor.
+  if (!impl->getNativeExecutableGraphHandle()) {
+    impl->makePartitions();
 
-  // Handle any work required for graph-owned memory allocations
-  impl->finalizeMemoryAllocations();
+    // Handle any work required for graph-owned memory allocations
+    impl->finalizeMemoryAllocations();
 
-  auto Device = impl->getGraphImpl()->getDevice();
-  for (auto Partition : impl->getPartitions()) {
-    if (!Partition->MIsHostTask) {
-      impl->createCommandBuffers(Device, Partition);
+    auto Device = impl->getGraphImpl()->getDevice();
+    for (auto Partition : impl->getPartitions()) {
+      if (!Partition->MIsHostTask) {
+        impl->createCommandBuffers(Device, Partition);
+      }
     }
+    impl->buildRequirements();
   }
-  impl->buildRequirements();
 }
 
 void executable_command_graph::update(

@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // RUN: %{build} -o %t.out
 // RUN: %if hip %{ env SYCL_JIT_AMDGCN_PTX_TARGET_CPU=%{amd_arch} %} %{run} %t.out | FileCheck %s
 
@@ -27,7 +29,7 @@ int main(int argc, char **argv) {
     std::string src = R"""(
 #include "non-existent.hpp"
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 
 namespace syclext = sycl::ext::oneapi;
 namespace syclexp = sycl::ext::oneapi::experimental;

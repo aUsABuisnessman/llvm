@@ -1,6 +1,5 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
@@ -8,9 +7,10 @@
 
 using urProgramCompileWithParamTest = uur::urProgramTestWithParam<std::string>;
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(urProgramCompileWithParamTest,
-                                 ::testing::Values("-O0", "-O1", "-O2", "-O3"),
-                                 uur::deviceTestWithParamPrinter<std::string>);
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
+    urProgramCompileWithParamTest,
+    ::testing::Values("-O0", "-O1", "-O2", "-O3"),
+    uur::deviceTestWithParamPrinterMulti<std::string>);
 
 TEST_P(urProgramCompileWithParamTest, Success) {
   const char *platformOption = nullptr;
@@ -21,7 +21,7 @@ TEST_P(urProgramCompileWithParamTest, Success) {
 }
 
 using urProgramCompileTest = uur::urProgramTest;
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urProgramCompileTest);
+UUR_DEVICE_TEST_SUITE_WITH_DEFAULT_QUEUE(urProgramCompileTest);
 
 TEST_P(urProgramCompileTest, Success) {
   ASSERT_SUCCESS(urProgramCompile(context, program, nullptr));

@@ -1,28 +1,20 @@
-# Copyright (C) 2024-2025 Intel Corporation
-# Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-# See LICENSE.TXT
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import os
 import shutil
 import subprocess
-from pathlib import Path
-from enum import Enum
-from utils.result import BenchmarkMetadata, BenchmarkTag, Result
-from options import options
-from utils.utils import download, run
 from abc import ABC, abstractmethod
-from utils.unitrace import get_unitrace
+from pathlib import Path
+
+from psutil import Process
+
+from options import options
 from utils.flamegraph import get_flamegraph
 from utils.logger import log
-
-
-class TracingType(Enum):
-    """Enumeration of available tracing types."""
-
-    NONE = ""
-    UNITRACE = "unitrace"
-    FLAMEGRAPH = "flamegraph"
+from utils.result import BenchmarkMetadata, BenchmarkTag, Result
+from utils.utils import download, run
 
 
 benchmark_tags = [
@@ -43,6 +35,7 @@ benchmark_tags = [
     BenchmarkTag("inference", "Tests ML/AI inference performance"),
     BenchmarkTag("image", "Image processing benchmark"),
     BenchmarkTag("simulation", "Physics or scientific simulation benchmark"),
+    BenchmarkTag("pytorch", "Tests workloads close to Pytorch ones"),
 ]
 
 benchmark_tags_dict = {tag.name: tag for tag in benchmark_tags}
@@ -54,6 +47,28 @@ class Benchmark(ABC):
 
     @abstractmethod
     def name(self) -> str:
+        pass
+
+    @abstractmethod
+    def run(
+        self,
+        env_vars,
+        flamegraph_enabled: bool = False,
+        force_trace: bool = False,
+    ) -> list[Result]:
+        """Execute the benchmark with the given environment variables.
+
+        Args:
+            env_vars: Environment variables to use when running the benchmark.
+            flamegraph_enabled: Whether to enable FlameGraph tracing.
+            force_trace: If True, ignore the traceable() method and force tracing.
+
+        Returns:
+            A list of Result objects with the benchmark results.
+
+        Raises:
+            Exception: If the benchmark fails for any reason.
+        """
         pass
 
     def display_name(self) -> str:
@@ -72,58 +87,20 @@ class Benchmark(ABC):
         By default, it returns True, but can be overridden to disable a benchmark."""
         return True
 
-    def traceable(self, tracing_type: TracingType) -> bool:
-        """Returns whether this benchmark should be traced by the specified tracing method.
-        By default, it returns True for all tracing types, but can be overridden
-        to disable specific tracing methods for a benchmark.
+    def traceable(self) -> bool:
+        """Returns whether this benchmark should be traced.
+        By default, it returns True, but can be overridden
+        to disable tracing for a specific benchmark.
         """
         return True
 
-    def tracing_enabled(self, run_trace, force_trace, tr_type: TracingType):
-        """Returns whether tracing is enabled for the given type."""
-        return (self.traceable(tr_type) or force_trace) and run_trace == tr_type
+    def tracing_enabled(self, flamegraph_enabled, force_trace):
+        """Returns whether tracing with flamegraph is enabled."""
+        return flamegraph_enabled or force_trace
 
     def setup(self):
         """Extra setup steps to be performed before running the benchmark."""
         pass
-
-    @abstractmethod
-    def teardown(self):
-        pass
-
-    @abstractmethod
-    def run(
-        self,
-        env_vars,
-        run_trace: TracingType = TracingType.NONE,
-        force_trace: bool = False,
-    ) -> list[Result]:
-        """Execute the benchmark with the given environment variables.
-
-        Args:
-            env_vars: Environment variables to use when running the benchmark.
-            run_trace: The type of tracing to run (NONE, UNITRACE, or FLAMEGRAPH).
-            force_trace: If True, ignore the traceable() method and force tracing.
-
-        Returns:
-            A list of Result objects with the benchmark results.
-
-        Raises:
-            Exception: If the benchmark fails for any reason.
-        """
-        pass
-
-    @staticmethod
-    def get_adapter_full_path():
-        for libs_dir_name in ["lib", "lib64"]:
-            adapter_path = os.path.join(
-                options.ur, libs_dir_name, f"libur_adapter_{options.ur_adapter}.so"
-            )
-            if os.path.isfile(adapter_path):
-                return adapter_path
-        assert (
-            False
-        ), f"could not find adapter file {adapter_path} (and in similar lib paths)"
 
     def run_bench(
         self,
@@ -132,12 +109,11 @@ class Benchmark(ABC):
         ld_library=[],
         add_sycl=True,
         use_stdout=True,
-        run_trace: TracingType = TracingType.NONE,
-        extra_trace_opt=None,
+        flamegraph_enabled: bool = False,
         force_trace: bool = False,
     ):
-        env_vars = env_vars.copy()
-        if options.ur is not None:
+        env_vars = dict(env_vars) if env_vars else {}
+        if options.sycl is not None:
             env_vars.update(
                 {"UR_ADAPTERS_FORCE_LOAD": Benchmark.get_adapter_full_path()}
             )
@@ -147,25 +123,16 @@ class Benchmark(ABC):
         ld_libraries = options.extra_ld_libraries.copy()
         ld_libraries.extend(ld_library)
 
-        unitrace_output = None
-        if self.tracing_enabled(run_trace, force_trace, TracingType.UNITRACE):
-            if extra_trace_opt is None:
-                extra_trace_opt = []
-            unitrace_output, command = get_unitrace().setup(
-                self.name(), command, extra_trace_opt
-            )
-            log.debug(f"Unitrace output: {unitrace_output}")
-            log.debug(f"Unitrace command: {' '.join(command)}")
-
         # flamegraph run
-
         perf_data_file = None
-        if self.tracing_enabled(run_trace, force_trace, TracingType.FLAMEGRAPH):
+        if self.tracing_enabled(flamegraph_enabled, force_trace):
             perf_data_file, command = get_flamegraph().setup(
                 self.name(), self.get_suite_name(), command
             )
             log.debug(f"FlameGraph perf data: {perf_data_file}")
             log.debug(f"FlameGraph command: {' '.join(command)}")
+
+        command = self.taskset_cmd() + command
 
         try:
             result = run(
@@ -176,22 +143,11 @@ class Benchmark(ABC):
                 ld_library=ld_libraries,
             )
         except subprocess.CalledProcessError:
-            if run_trace == TracingType.UNITRACE and unitrace_output:
-                get_unitrace().cleanup(options.benchmark_cwd, unitrace_output)
-            if run_trace == TracingType.FLAMEGRAPH and perf_data_file:
+            if flamegraph_enabled and perf_data_file:
                 get_flamegraph().cleanup(perf_data_file)
             raise
 
-        if (
-            self.tracing_enabled(run_trace, force_trace, TracingType.UNITRACE)
-            and unitrace_output
-        ):
-            get_unitrace().handle_output(unitrace_output)
-
-        if (
-            self.tracing_enabled(run_trace, force_trace, TracingType.FLAMEGRAPH)
-            and perf_data_file
-        ):
+        if self.tracing_enabled(flamegraph_enabled, force_trace) and perf_data_file:
             svg_file = get_flamegraph().handle_output(
                 self.name(), perf_data_file, self.get_suite_name()
             )
@@ -227,7 +183,7 @@ class Benchmark(ABC):
         self.data_path = self.create_data_path(name, skip_data_dir)
         return download(self.data_path, url, file, untar, unzip, checksum)
 
-    def lower_is_better(self):
+    def lower_is_better(self) -> bool:
         return True
 
     def stddev_threshold(self):
@@ -236,7 +192,7 @@ class Benchmark(ABC):
     def get_suite_name(self) -> str:
         return self.suite.name()
 
-    def description(self):
+    def description(self) -> str:
         return ""
 
     def notes(self) -> str:
@@ -267,6 +223,28 @@ class Benchmark(ABC):
                 explicit_group=self.explicit_group(),
             )
         }
+
+    def taskset_cmd(self) -> list[str]:
+        """Returns a list of strings with taskset usage for core pinning.
+        Pin compute benchmarks to a CPU cores set to ensure consistent results
+        and non-zero CPU count measurements (e.g. avoid E-cores). Exactly 4 cores
+        are pinned by default to satisfy multiple threads benchmarks. It is assumed
+        that they have the maximum, or at least similar, frequency.
+        """
+        selected_cores = [str(core) for core in Process().cpu_affinity()[:4]]  # type: ignore
+        return ["taskset", "-c", ",".join(selected_cores)]
+
+    @staticmethod
+    def get_adapter_full_path():
+        for libs_dir_name in ["lib", "lib64"]:
+            adapter_path = os.path.join(
+                options.sycl, libs_dir_name, f"libur_adapter_{options.ur_adapter}.so"
+            )
+            if os.path.isfile(adapter_path):
+                return adapter_path
+        assert (
+            False
+        ), f"could not find adapter file {adapter_path} (and in similar lib paths)"
 
 
 class Suite(ABC):

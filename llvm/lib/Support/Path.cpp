@@ -19,6 +19,7 @@
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/IOSandbox.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Signals.h"
 #include <cctype>
@@ -547,6 +548,12 @@ void native(const Twine &path, SmallVectorImpl<char> &result, Style style) {
   native(result, style);
 }
 
+std::string native(const Twine &path, Style style) {
+  SmallString<128> Result;
+  native(path, Result, style);
+  return std::string(Result);
+}
+
 void native(SmallVectorImpl<char> &Path, Style style) {
   if (Path.empty())
     return;
@@ -558,7 +565,7 @@ void native(SmallVectorImpl<char> &Path, Style style) {
       SmallString<128> PathHome;
       home_directory(PathHome);
       PathHome.append(Path.begin() + 1, Path.end());
-      Path = PathHome;
+      Path = std::move(PathHome);
     }
   } else {
     llvm::replace(Path, '\\', '/');
@@ -766,8 +773,6 @@ StringRef remove_leading_dotbackslash_only(StringRef Path) {
   return Path;
 }
 
-// Remove path traversal components ("." and "..") when possible, and
-// canonicalize slashes.
 bool remove_dots(SmallVectorImpl<char> &the_path, bool remove_dot_dot,
                  Style style) {
   style = real_style(style);
@@ -841,6 +846,8 @@ bool remove_dots(SmallVectorImpl<char> &the_path, bool remove_dot_dot,
 namespace fs {
 
 std::error_code getUniqueID(const Twine Path, UniqueID &Result) {
+  sandbox::violationIfEnabled();
+
   file_status Status;
   std::error_code EC = status(Path, Status);
   if (EC)
@@ -853,6 +860,9 @@ void createUniquePath(const Twine &Model, SmallVectorImpl<char> &ResultPath,
                       bool MakeAbsolute) {
   SmallString<128> ModelStorage;
   Model.toVector(ModelStorage);
+
+  assert(llvm::is_contained(ModelStorage, '%') &&
+         "createUniquePath: Model must contain at least one '%'");
 
   if (MakeAbsolute) {
     // Make model absolute by prepending a temp directory if it's not already.
@@ -898,6 +908,10 @@ static std::error_code
 createTemporaryFile(const Twine &Model, int &ResultFD,
                     llvm::SmallVectorImpl<char> &ResultPath, FSEntity Type,
                     sys::fs::OpenFlags Flags = sys::fs::OF_None) {
+  // Any *temporary* file is assumed to be a compiler-internal output, not
+  // a formal one.
+  auto BypassSandbox = sys::sandbox::scopedDisable();
+
   SmallString<128> Storage;
   StringRef P = Model.toNullTerminatedStringRef(Storage);
   assert(P.find_first_of(separators(Style::native)) == StringRef::npos &&
@@ -960,6 +974,8 @@ getPotentiallyUniqueTempFileName(const Twine &Prefix, StringRef Suffix,
 }
 
 std::error_code make_absolute(SmallVectorImpl<char> &path) {
+  sandbox::violationIfEnabled();
+
   if (path::is_absolute(path))
     return {};
 
@@ -1052,6 +1068,8 @@ std::error_code copy_file(const Twine &From, int ToFD) {
 }
 
 ErrorOr<MD5::MD5Result> md5_contents(int FD) {
+  sandbox::violationIfEnabled();
+
   MD5 Hash;
 
   constexpr size_t BufSize = 4096;
@@ -1072,6 +1090,8 @@ ErrorOr<MD5::MD5Result> md5_contents(int FD) {
 }
 
 ErrorOr<MD5::MD5Result> md5_contents(const Twine &Path) {
+  sandbox::violationIfEnabled();
+
   int FD;
   if (auto EC = openFileForRead(Path, FD, OF_None))
     return EC;
@@ -1101,6 +1121,8 @@ bool is_directory(const basic_file_status &status) {
 }
 
 std::error_code is_directory(const Twine &path, bool &result) {
+  sandbox::violationIfEnabled();
+
   file_status st;
   if (std::error_code ec = status(path, st))
     return ec;
@@ -1113,6 +1135,8 @@ bool is_regular_file(const basic_file_status &status) {
 }
 
 std::error_code is_regular_file(const Twine &path, bool &result) {
+  sandbox::violationIfEnabled();
+
   file_status st;
   if (std::error_code ec = status(path, st))
     return ec;
@@ -1125,6 +1149,8 @@ bool is_symlink_file(const basic_file_status &status) {
 }
 
 std::error_code is_symlink_file(const Twine &path, bool &result) {
+  sandbox::violationIfEnabled();
+
   file_status st;
   if (std::error_code ec = status(path, st, false))
     return ec;
@@ -1139,6 +1165,8 @@ bool is_other(const basic_file_status &status) {
 }
 
 std::error_code is_other(const Twine &Path, bool &Result) {
+  sandbox::violationIfEnabled();
+
   file_status FileStatus;
   if (std::error_code EC = status(Path, FileStatus))
     return EC;
@@ -1156,6 +1184,8 @@ void directory_entry::replace_filename(const Twine &Filename, file_type Type,
 }
 
 ErrorOr<perms> getPermissions(const Twine &Path) {
+  sandbox::violationIfEnabled();
+
   file_status Status;
   if (std::error_code EC = status(Path, Status))
     return EC;
@@ -1180,9 +1210,11 @@ const char *mapped_file_region::const_data() const {
 
 Error readNativeFileToEOF(file_t FileHandle, SmallVectorImpl<char> &Buffer,
                           ssize_t ChunkSize) {
+  sandbox::violationIfEnabled();
+
   // Install a handler to truncate the buffer to the correct size on exit.
   size_t Size = Buffer.size();
-  auto TruncateOnExit = make_scope_exit([&]() { Buffer.truncate(Size); });
+  llvm::scope_exit TruncateOnExit([&]() { Buffer.truncate(Size); });
 
   // Read into Buffer until we hit EOF.
   for (;;) {

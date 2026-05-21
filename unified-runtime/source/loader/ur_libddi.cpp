@@ -1,10 +1,9 @@
 /*
  *
- * Copyright (C) 2022 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
  * Exceptions.
- * See LICENSE.TXT
+ * See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -13,7 +12,7 @@
  */
 #include "ur_lib.hpp"
 #ifndef DYNAMIC_LOAD_LOADER
-#include "ur_ddi.h"
+#include "unified-runtime/ur_ddi.h"
 #endif
 
 namespace ur_lib {
@@ -57,6 +56,11 @@ __urdlllocal ur_result_t context_t::ddiInit() {
   }
 
   if (UR_RESULT_SUCCESS == result) {
+    result = urGetGraphExpProcAddrTable(UR_API_VERSION_CURRENT,
+                                        &urDdiTable.GraphExp);
+  }
+
+  if (UR_RESULT_SUCCESS == result) {
     result =
         urGetIPCExpProcAddrTable(UR_API_VERSION_CURRENT, &urDdiTable.IPCExp);
   }
@@ -97,6 +101,11 @@ __urdlllocal ur_result_t context_t::ddiInit() {
 
   if (UR_RESULT_SUCCESS == result) {
     result = urGetQueueProcAddrTable(UR_API_VERSION_CURRENT, &urDdiTable.Queue);
+  }
+
+  if (UR_RESULT_SUCCESS == result) {
+    result = urGetQueueExpProcAddrTable(UR_API_VERSION_CURRENT,
+                                        &urDdiTable.QueueExp);
   }
 
   if (UR_RESULT_SUCCESS == result) {

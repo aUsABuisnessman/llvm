@@ -1,8 +1,7 @@
 """
-Copyright (C) 2025 Intel Corporation
 
-Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-See LICENSE.TXT
+Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+See https://llvm.org/LICENSE.txt for license information.
 SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
@@ -17,6 +16,10 @@ config.test_source_root = config.binary_dir
 config.test_exec_root = config.binary_dir
 
 config.environment["UR_LOADER_USE_LEVEL_ZERO_V2"] = "1" if config.using_l0_v2 else "0"
+
+# Copy offload leads to timeouts
+# Tracker: https://jira.devtools.intel.com/browse/URT-1026
+config.environment["UR_L0_V2_FORCE_DISABLE_COPY_OFFLOAD"] = "1"
 
 if "UR_CTS_ALSO_RUN_KNOWN_FAILURES" in os.environ:
     config.environment["UR_CTS_ALSO_RUN_KNOWN_FAILURES"] = os.environ[

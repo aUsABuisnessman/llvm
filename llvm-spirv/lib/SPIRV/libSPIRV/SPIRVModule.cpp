@@ -53,6 +53,7 @@
 #include "SPIRVValue.h"
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
 
 #include <set>
 #include <unordered_map>
@@ -328,8 +329,6 @@ public:
   SPIRVEntry *addTypeStructContinuedINTEL(unsigned NumMembers) override;
   void closeStructType(SPIRVTypeStruct *T, bool) override;
   SPIRVTypeVector *addVectorType(SPIRVType *, SPIRVWord) override;
-  SPIRVTypeJointMatrixINTEL *
-  addJointMatrixINTELType(SPIRVType *, std::vector<SPIRVValue *>) override;
   SPIRVTypeCooperativeMatrixKHR *
   addCooperativeMatrixKHRType(SPIRVType *, std::vector<SPIRVValue *>) override;
   SPIRVTypeTaskSequenceINTEL *addTaskSequenceINTELType() override;
@@ -517,7 +516,8 @@ public:
   SPIRVInstruction *addTransposeInst(SPIRVType *TheType, SPIRVId TheMatrix,
                                      SPIRVBasicBlock *BB) override;
   SPIRVInstruction *addUnaryInst(Op, SPIRVType *, SPIRVValue *,
-                                 SPIRVBasicBlock *) override;
+                                 SPIRVBasicBlock *,
+                                 SPIRVInstruction * = nullptr) override;
   SPIRVInstruction *addVariable(SPIRVType *, SPIRVType *, bool,
                                 SPIRVLinkageTypeKind, SPIRVValue *,
                                 const std::string &, SPIRVStorageClassKind,
@@ -641,6 +641,8 @@ private:
       FloatTypeMap;
   SmallDenseMap<std::pair<unsigned, SPIRVType *>, SPIRVTypePointer *, 4>
       PointerTypeMap;
+  SmallDenseMap<std::pair<SPIRVType *, SPIRVWord>, SPIRVTypeVector *, 4>
+      VectorTypeMap;
   std::unordered_map<unsigned, SPIRVConstant *> LiteralMap;
   std::vector<SPIRVExtInst *> DebugInstVec;
   std::vector<SPIRVExtInst *> AuxDataInstVec;
@@ -659,12 +661,6 @@ SPIRVModuleImpl::~SPIRVModuleImpl() {
 
   for (auto I : IdEntryMap)
     delete I.second;
-
-  for (auto C : CapMap)
-    delete C.second;
-
-  for (auto C : ConditionalCapMap)
-    delete C.second;
 
   for (auto *M : ModuleProcessedVec)
     delete M;
@@ -784,10 +780,12 @@ void SPIRVModuleImpl::addCapability(SPIRVCapabilityKind Cap) {
   addCapabilities(SPIRV::getCapability(Cap));
   SPIRVDBG(spvdbgs() << "addCapability: " << SPIRVCapabilityNameMap::map(Cap)
                      << '\n');
-  if (hasCapability(Cap))
+
+  auto [It, Inserted] = CapMap.try_emplace(Cap);
+  if (!Inserted)
     return;
 
-  auto *CapObj = new SPIRVCapability(this, Cap);
+  auto CapObj = std::make_unique<SPIRVCapability>(this, Cap);
   if (AutoAddExtensions) {
     // While we are reading existing SPIR-V we need to read it as-is and don't
     // add required extensions for each entry automatically
@@ -796,15 +794,16 @@ void SPIRVModuleImpl::addCapability(SPIRVCapabilityKind Cap) {
       addExtension(Ext.value());
   }
 
-  CapMap.insert(std::make_pair(Cap, CapObj));
+  It->second = std::move(CapObj);
 }
 
 void SPIRVModuleImpl::addCapabilityInternal(SPIRVCapabilityKind Cap) {
   if (AutoAddCapability) {
-    if (hasCapability(Cap))
+    auto [It, Inserted] = CapMap.try_emplace(Cap);
+    if (!Inserted)
       return;
 
-    CapMap.insert(std::make_pair(Cap, new SPIRVCapability(this, Cap)));
+    It->second = std::make_unique<SPIRVCapability>(this, Cap);
   }
 }
 
@@ -813,18 +812,19 @@ void SPIRVModuleImpl::addConditionalCapability(SPIRVId Condition,
   SPIRVDBG(spvdbgs() << "addConditionalCapability: "
                      << SPIRVCapabilityNameMap::map(Cap)
                      << ", condition: " << Condition << '\n');
-  if (ConditionalCapMap.find(std::make_pair(Condition, Cap)) !=
-      ConditionalCapMap.end()) {
+  auto Key = std::make_pair(Condition, Cap);
+  auto [It, Inserted] = ConditionalCapMap.try_emplace(Key);
+  if (!Inserted) {
     return;
   }
 
-  auto *CapObj = new SPIRVConditionalCapabilityINTEL(this, Condition, Cap);
+  auto CapObj =
+      std::make_unique<SPIRVConditionalCapabilityINTEL>(this, Condition, Cap);
   if (AutoAddExtensions) {
     assert(false && "Auto adding conditional extensions is not supported.");
   }
 
-  ConditionalCapMap.insert(
-      std::make_pair(std::make_pair(Condition, Cap), CapObj));
+  It->second = std::move(CapObj);
 }
 
 void SPIRVModuleImpl::eraseConditionalCapability(SPIRVId Condition,
@@ -1160,13 +1160,13 @@ void SPIRVModuleImpl::closeStructType(SPIRVTypeStruct *T, bool Packed) {
 
 SPIRVTypeVector *SPIRVModuleImpl::addVectorType(SPIRVType *CompType,
                                                 SPIRVWord CompCount) {
-  return addType(new SPIRVTypeVector(this, getId(), CompType, CompCount));
-}
-
-SPIRVTypeJointMatrixINTEL *
-SPIRVModuleImpl::addJointMatrixINTELType(SPIRVType *CompType,
-                                         std::vector<SPIRVValue *> Args) {
-  return addType(new SPIRVTypeJointMatrixINTEL(this, getId(), CompType, Args));
+  auto Desc = std::make_pair(CompType, CompCount);
+  auto Loc = VectorTypeMap.find(Desc);
+  if (Loc != VectorTypeMap.end())
+    return Loc->second;
+  auto *Ty = new SPIRVTypeVector(this, getId(), CompType, CompCount);
+  VectorTypeMap[Desc] = Ty;
+  return addType(Ty);
 }
 
 SPIRVTypeCooperativeMatrixKHR *
@@ -1434,6 +1434,13 @@ SPIRVValue *SPIRVModuleImpl::addNullConstant(SPIRVType *Ty) {
 
 SPIRVValue *SPIRVModuleImpl::addCompositeConstant(
     SPIRVType *Ty, const std::vector<SPIRVValue *> &Elements) {
+  // Add an OpSpecConstantComposite instead if any of the elements is a
+  // SpecConstant.
+  if (llvm::any_of(Elements, [](SPIRVValue *V) {
+        return isSpecConstantOpCode(V->getOpCode());
+      }))
+    return addSpecConstantComposite(Ty, Elements);
+
   constexpr int MaxNumElements = MaxWordCount - SPIRVConstantComposite::FixedWC;
   const int NumElements = Elements.size();
 
@@ -1742,16 +1749,17 @@ SPIRVInstruction *SPIRVModuleImpl::addReturnValueInst(SPIRVValue *ReturnValue,
   return addInstruction(new SPIRVReturnValue(ReturnValue, BB), BB);
 }
 
-SPIRVInstruction *SPIRVModuleImpl::addUnaryInst(Op TheOpCode,
-                                                SPIRVType *TheType,
-                                                SPIRVValue *Op,
-                                                SPIRVBasicBlock *BB) {
-  if (TheType->isTypeFloat(16, FPEncodingBFloat16KHR) && TheOpCode != OpDot)
+SPIRVInstruction *
+SPIRVModuleImpl::addUnaryInst(Op TheOpCode, SPIRVType *TheType, SPIRVValue *Op,
+                              SPIRVBasicBlock *BB,
+                              SPIRVInstruction *InsertBefore) {
+  if (TheType->isTypeFloat(16, FPEncodingBFloat16KHR) &&
+      (TheOpCode == OpFNegate || isUnaryPredicateOpCode(TheOpCode)))
     addCapability(internal::CapabilityBFloat16ArithmeticINTEL);
   return addInstruction(
       SPIRVInstTemplateBase::create(TheOpCode, TheType, getId(),
                                     getVec(Op->getId()), BB, this),
-      BB);
+      BB, InsertBefore);
 }
 
 SPIRVInstruction *SPIRVModuleImpl::addVectorExtractDynamicInst(
@@ -1848,10 +1856,24 @@ SPIRVInstruction *SPIRVModuleImpl::addSelectionMergeInst(
 SPIRVInstruction *SPIRVModuleImpl::addLoopMergeInst(
     SPIRVId MergeBlock, SPIRVId ContinueTarget, SPIRVWord LoopControl,
     std::vector<SPIRVWord> LoopControlParameters, SPIRVBasicBlock *BB) {
-  return addInstruction(
-      new SPIRVLoopMerge(MergeBlock, ContinueTarget, LoopControl,
-                         LoopControlParameters, BB),
-      BB, const_cast<SPIRVInstruction *>(BB->getTerminateInstr()));
+  SPIRVInstruction *TermInst =
+      const_cast<SPIRVInstruction *>(BB->getTerminateInstr());
+  // OpLoopMerge must be the second-to-last instruction in the block,
+  // immediately preceding the branch instruction (OpBranch or
+  // OpBranchConditional)
+  if (TermInst && (TermInst->getOpCode() == OpBranch ||
+                   TermInst->getOpCode() == OpBranchConditional)) {
+    return addInstruction(new SPIRVLoopMerge(MergeBlock, ContinueTarget,
+                                             LoopControl, LoopControlParameters,
+                                             BB),
+                          BB, TermInst);
+  }
+  // If terminator doesn't exist yet or is not a branch, add at end
+  // (it will be before terminator when added)
+  return addInstruction(new SPIRVLoopMerge(MergeBlock, ContinueTarget,
+                                           LoopControl, LoopControlParameters,
+                                           BB),
+                        BB);
 }
 
 SPIRVInstruction *SPIRVModuleImpl::addLoopControlINTELInst(
@@ -1859,9 +1881,21 @@ SPIRVInstruction *SPIRVModuleImpl::addLoopControlINTELInst(
     SPIRVBasicBlock *BB) {
   addCapability(CapabilityUnstructuredLoopControlsINTEL);
   addExtension(ExtensionID::SPV_INTEL_unstructured_loop_controls);
+  SPIRVInstruction *TermInst =
+      const_cast<SPIRVInstruction *>(BB->getTerminateInstr());
+  // OpLoopControlINTEL must be the second-to-last instruction in the block,
+  // immediately preceding the branch instruction (OpBranch or
+  // OpBranchConditional)
+  if (TermInst && (TermInst->getOpCode() == OpBranch ||
+                   TermInst->getOpCode() == OpBranchConditional)) {
+    return addInstruction(
+        new SPIRVLoopControlINTEL(LoopControl, LoopControlParameters, BB), BB,
+        TermInst);
+  }
+  // If terminator doesn't exist yet or is not a branch, add at end
+  // (it will be before terminator when added)
   return addInstruction(
-      new SPIRVLoopControlINTEL(LoopControl, LoopControlParameters, BB), BB,
-      const_cast<SPIRVInstruction *>(BB->getTerminateInstr()));
+      new SPIRVLoopControlINTEL(LoopControl, LoopControlParameters, BB), BB);
 }
 
 SPIRVInstruction *SPIRVModuleImpl::addFixedPointIntelInst(

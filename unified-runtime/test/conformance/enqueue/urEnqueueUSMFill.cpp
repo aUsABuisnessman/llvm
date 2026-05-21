@@ -1,11 +1,11 @@
-// Copyright (C) 2023 Intel Corporation
-// Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
-// Exceptions. See LICENSE.TXT
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include <uur/fixtures.h>
 #include <uur/known_failure.h>
+#include <uur/raii.h>
 
 struct testParametersFill {
   size_t size;
@@ -18,22 +18,25 @@ printFillTestString(const testing::TestParamInfo<typename T::ParamType> &info) {
   const auto device_handle = std::get<0>(info.param).device;
   const auto platform_device_name =
       uur::GetPlatformAndDeviceName(device_handle);
+
+  auto paramTuple = std::get<1>(info.param);
+  auto param = std::get<0>(paramTuple);
+  auto queueMode = std::get<1>(paramTuple);
   std::stringstream test_name;
-  test_name << platform_device_name << "__size__"
-            << std::get<1>(info.param).size << "__patternSize__"
-            << std::get<1>(info.param).pattern_size;
+  test_name << platform_device_name << "__size__" << param.size
+            << "__patternSize__" << param.pattern_size << "__" << queueMode;
   return test_name.str();
 }
 
 struct urEnqueueUSMFillTestWithParam
-    : uur::urQueueTestWithParam<testParametersFill> {
+    : uur::urMultiQueueTypeTestWithParam<testParametersFill> {
 
   void SetUp() override {
-    UUR_RETURN_ON_FATAL_FAILURE(urQueueTestWithParam::SetUp());
+    UUR_RETURN_ON_FATAL_FAILURE(urMultiQueueTypeTestWithParam::SetUp());
 
-    size = std::get<1>(GetParam()).size;
+    size = getParam().size;
     host_mem = std::vector<uint8_t>(size);
-    pattern_size = std::get<1>(GetParam()).pattern_size;
+    pattern_size = getParam().pattern_size;
     pattern = std::vector<uint8_t>(pattern_size);
     uur::generateMemFillPattern(pattern);
 
@@ -52,7 +55,7 @@ struct urEnqueueUSMFillTestWithParam
       EXPECT_SUCCESS(urUSMFree(context, ptr));
     }
 
-    UUR_RETURN_ON_FATAL_FAILURE(urQueueTestWithParam::TearDown());
+    UUR_RETURN_ON_FATAL_FAILURE(urMultiQueueTypeTestWithParam::TearDown());
   }
 
   void verifyData() {
@@ -94,7 +97,7 @@ static std::vector<testParametersFill> test_cases{
     {256, 16},
     {256, 32}};
 
-UUR_DEVICE_TEST_SUITE_WITH_PARAM(
+UUR_MULTI_QUEUE_TYPE_TEST_SUITE_WITH_PARAM(
     urEnqueueUSMFillTestWithParam, testing::ValuesIn(test_cases),
     printFillTestString<urEnqueueUSMFillTestWithParam>);
 
@@ -119,11 +122,11 @@ TEST_P(urEnqueueUSMFillTestWithParam, Success) {
   ASSERT_NO_FATAL_FAILURE(verifyData());
 }
 
-struct urEnqueueUSMFillNegativeTest : uur::urQueueTest {
+struct urEnqueueUSMFillNegativeTest : uur::urMultiQueueTypeTest {
   void SetUp() override {
     UUR_KNOWN_FAILURE_ON(uur::NativeCPU{});
 
-    UUR_RETURN_ON_FATAL_FAILURE(uur::urQueueTest::SetUp());
+    UUR_RETURN_ON_FATAL_FAILURE(uur::urMultiQueueTypeTest::SetUp());
 
     ur_device_usm_access_capability_flags_t device_usm = 0;
     ASSERT_SUCCESS(uur::GetDeviceUSMDeviceSupport(device, device_usm));
@@ -140,7 +143,7 @@ struct urEnqueueUSMFillNegativeTest : uur::urQueueTest {
       EXPECT_SUCCESS(urUSMFree(context, ptr));
     }
 
-    UUR_RETURN_ON_FATAL_FAILURE(uur::urQueueTest::TearDown());
+    UUR_RETURN_ON_FATAL_FAILURE(uur::urMultiQueueTypeTest::TearDown());
   }
 
   static constexpr size_t size = 16;
@@ -149,7 +152,7 @@ struct urEnqueueUSMFillNegativeTest : uur::urQueueTest {
   void *ptr{nullptr};
 };
 
-UUR_INSTANTIATE_DEVICE_TEST_SUITE(urEnqueueUSMFillNegativeTest);
+UUR_INSTANTIATE_DEVICE_TEST_SUITE_MULTI_QUEUE(urEnqueueUSMFillNegativeTest);
 
 TEST_P(urEnqueueUSMFillNegativeTest, InvalidNullQueueHandle) {
   ASSERT_EQ_RESULT(urEnqueueUSMFill(nullptr, ptr, pattern_size, pattern.data(),
@@ -213,16 +216,15 @@ TEST_P(urEnqueueUSMFillNegativeTest, InvalidEventWaitList) {
                                     size, 1, nullptr, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
-  ur_event_handle_t validEvent;
-  ASSERT_SUCCESS(urEnqueueEventsWait(queue, 0, nullptr, &validEvent));
+  uur::raii::Event eventDummy = nullptr;
+  ASSERT_SUCCESS(uur::MakeDummyEventForWaitList(context, eventDummy.ptr()));
 
   ASSERT_EQ_RESULT(urEnqueueUSMFill(queue, ptr, pattern_size, pattern.data(),
-                                    size, 0, &validEvent, nullptr),
+                                    size, 0, eventDummy.ptr(), nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
   ur_event_handle_t inv_evt = nullptr;
   ASSERT_EQ_RESULT(urEnqueueUSMFill(queue, ptr, pattern_size, pattern.data(),
                                     size, 1, &inv_evt, nullptr),
                    UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
-  ASSERT_SUCCESS(urEventRelease(validEvent));
 }

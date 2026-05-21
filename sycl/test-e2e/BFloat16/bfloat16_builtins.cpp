@@ -8,14 +8,13 @@
 // RUN: %clangxx -fsycl %{sycl_target_opts} %if target-nvidia %{ -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_80 %} %s -o %t.out %{mathflags}
 // RUN: %{run} %t.out
 
-// Test "new" (ABI breaking) for all platforms ( sm_80/native if CUDA )
-// RUN:  %if preview-breaking-changes-supported %{  %clangxx -fsycl -fpreview-breaking-changes %{sycl_target_opts} %if target-nvidia %{ -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_80 %} %s -o %t2.out %{mathflags} %}
-// RUN:  %if preview-breaking-changes-supported %{  %{run} %t2.out  %}
-
 // Flaky timeout on CPU. Enable when fixed.
 // Depends on SPIR-V Backend & run-time drivers version.
 // UNSUPPORTED: spirv-backend && cpu
 // UNSUPPORTED-TRACKER: CMPLRLLVM-64705
+
+// XFAIL: linux && (gpu-intel-gen12 || gpu-intel-dg2 || arch-intel_gpu_pvc || arch-intel_gpu_bmg_g21 || arch-intel_gpu_mtl_u)
+// XFAIL-TRACKER: https://github.com/intel/llvm/issues/22054
 
 #include "bfloat16_builtins.hpp"
 

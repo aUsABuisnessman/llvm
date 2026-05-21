@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // RUN: %{build} '-DPCH_DIR="%/t.dir"' -o %t.out
 // RUN: %if hip %{ env SYCL_JIT_AMDGCN_PTX_TARGET_CPU=%{amd_arch} %} %{run} %t.out
 
@@ -20,7 +22,7 @@ int main() {
   constexpr int N = 16;
   std::string src_str = R"""(
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 namespace syclext = sycl::ext::oneapi;
 namespace syclexp = sycl::ext::oneapi::experimental;
 

@@ -90,6 +90,27 @@ const char *DeviceBinaryProperty::asCString() const {
   return ur::cast<const char *>(Prop->ValAddr) + Shift;
 }
 
+std::string_view DeviceBinaryProperty::asStringView() const {
+  const char *Str = asCString();
+  // ValSize covers the entire blob stored at ValAddr. The two property types
+  // that can carry string data have different layouts:
+  // - BYTE_ARRAY: used by PropertyValue (property_set_io.hpp) when serialising
+  //   any byte sequence, including strings. The blob starts with a mandatory
+  //   8-byte little-endian uint64_t encoding the payload bit-count, followed
+  //   by the actual bytes. asCString() already skips that 8-byte header, so
+  //   we subtract 8 from ValSize to get the true payload length.
+  // - STRING: a plain null-terminated C string written directly to ValAddr,
+  //   with ValSize counting the bytes including the terminator. asCString()
+  //   returns the start of the string directly, so we subtract 1 to exclude
+  //   the terminator from the view's length.
+  assert((Prop->Type == SYCL_PROPERTY_TYPE_STRING ||
+          Prop->Type == SYCL_PROPERTY_TYPE_BYTE_ARRAY) &&
+         "property type mismatch");
+  size_t Len = Prop->Type == SYCL_PROPERTY_TYPE_BYTE_ARRAY ? Prop->ValSize - 8
+                                                           : Prop->ValSize - 1;
+  return {Str, Len};
+}
+
 void RTDeviceBinaryImage::PropertyRange::init(sycl_device_binary Bin,
                                               const char *PropSetName) {
   assert(!this->Begin && !this->End && "already initialized");
@@ -188,11 +209,11 @@ RTDeviceBinaryImage::RTDeviceBinaryImage(sycl_device_binary Bin) {
   SpecConstIDMap.init(Bin, __SYCL_PROPERTY_SET_SPEC_CONST_MAP);
   SpecConstDefaultValuesMap.init(
       Bin, __SYCL_PROPERTY_SET_SPEC_CONST_DEFAULT_VALUES_MAP);
-  DeviceLibReqMask.init(Bin, __SYCL_PROPERTY_SET_DEVICELIB_REQ_MASK);
   DeviceLibMetadata.init(Bin, __SYCL_PROPERTY_SET_DEVICELIB_METADATA);
   KernelParamOptInfo.init(Bin, __SYCL_PROPERTY_SET_KERNEL_PARAM_OPT_INFO);
-  AssertUsed.init(Bin, __SYCL_PROPERTY_SET_SYCL_ASSERT_USED);
   ImplicitLocalArg.init(Bin, __SYCL_PROPERTY_SET_SYCL_IMPLICIT_LOCAL_ARG);
+  WorkGroupDynamicLocalMem.init(
+      Bin, __SYCL_PROPERTY_SET_SYCL_WORK_GROUP_DYNAMIC_LOCAL_MEM);
   ProgramMetadata.init(Bin, __SYCL_PROPERTY_SET_PROGRAM_METADATA);
   // Convert ProgramMetadata into the UR format
   for (const auto &Prop : ProgramMetadata) {
@@ -204,7 +225,6 @@ RTDeviceBinaryImage::RTDeviceBinaryImage(sycl_device_binary Bin) {
   ImportedSymbols.init(Bin, __SYCL_PROPERTY_SET_SYCL_IMPORTED_SYMBOLS);
   DeviceGlobals.init(Bin, __SYCL_PROPERTY_SET_SYCL_DEVICE_GLOBALS);
   DeviceRequirements.init(Bin, __SYCL_PROPERTY_SET_SYCL_DEVICE_REQUIREMENTS);
-  HostPipes.init(Bin, __SYCL_PROPERTY_SET_SYCL_HOST_PIPES);
   VirtualFunctions.init(Bin, __SYCL_PROPERTY_SET_SYCL_VIRTUAL_FUNCTIONS);
   RegisteredKernels.init(Bin, __SYCL_PROPERTY_SET_SYCL_REGISTERED_KERNELS);
   Misc.init(Bin, __SYCL_PROPERTY_SET_SYCL_MISC_PROP);
@@ -219,10 +239,6 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage()
   Bin->Kind = SYCL_DEVICE_BINARY_OFFLOAD_KIND_SYCL;
   Bin->CompileOptions = "";
   Bin->LinkOptions = "";
-#ifndef __INTEL_PREVIEW_BREAKING_CHANGES
-  Bin->ManifestStart = nullptr;
-  Bin->ManifestEnd = nullptr;
-#endif // __INTEL_PREVIEW_BREAKING_CHANGES
   Bin->BinaryStart = nullptr;
   Bin->BinaryEnd = nullptr;
   Bin->EntriesBegin = nullptr;
@@ -452,6 +468,10 @@ mergeDeviceRequirements(const std::vector<const RTDeviceBinaryImage *> &Imgs) {
         size_t Pos = 0;
         do {
           const size_t NextPos = Contents.find(';', Pos);
+          if (NextPos == std::string::npos) {
+            Set.emplace(Contents.substr(Pos));
+            break;
+          }
           if (NextPos != Pos)
             Set.emplace(Contents.substr(Pos, NextPos - Pos));
           Pos = NextPos + 1;
@@ -517,14 +537,10 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage(
       naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getKernelParamOptInfo();
       });
-  auto MergedAssertUsed = naiveMergeBinaryProperties(
-      Imgs, [](const RTDeviceBinaryImage &Img) { return Img.getAssertUsed(); });
   auto MergedDeviceGlobals =
       naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getDeviceGlobals();
       });
-  auto MergedHostPipes = naiveMergeBinaryProperties(
-      Imgs, [](const RTDeviceBinaryImage &Img) { return Img.getHostPipes(); });
   auto MergedVirtualFunctions =
       naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getVirtualFunctions();
@@ -533,6 +549,11 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage(
       naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getImplicitLocalArg();
       });
+  auto MergedWorkGroupDynamicLocalMem =
+      naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
+        return Img.getWorkGroupDynamicLocalMem();
+      });
+
   auto MergedKernelNames =
       naiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getKernelNames();
@@ -546,19 +567,19 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage(
         return Img.getRegisteredKernels();
       });
 
-  std::array<const std::vector<sycl_device_binary_property> *, 11> MergedVecs{
-      &MergedSpecConstants,      &MergedSpecConstantsDefaultValues,
-      &MergedKernelParamOptInfo, &MergedAssertUsed,
-      &MergedDeviceGlobals,      &MergedHostPipes,
-      &MergedVirtualFunctions,   &MergedImplicitLocalArg,
-      &MergedKernelNames,        &MergedExportedSymbols,
+  std::array<const std::vector<sycl_device_binary_property> *, 10> MergedVecs{
+      &MergedSpecConstants,
+      &MergedSpecConstantsDefaultValues,
+      &MergedKernelParamOptInfo,
+      &MergedDeviceGlobals,
+      &MergedVirtualFunctions,
+      &MergedImplicitLocalArg,
+      &MergedWorkGroupDynamicLocalMem,
+      &MergedKernelNames,
+      &MergedExportedSymbols,
       &MergedRegisteredKernels};
 
   // Exclusive merges.
-  auto MergedDeviceLibReqMask =
-      exclusiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
-        return Img.getDeviceLibReqMask();
-      });
   auto MergedProgramMetadata =
       exclusiveMergeBinaryProperties(Imgs, [](const RTDeviceBinaryImage &Img) {
         return Img.getProgramMetadata();
@@ -575,9 +596,8 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage(
 
   std::array<const std::unordered_map<std::string_view,
                                       const sycl_device_binary_property> *,
-             4>
-      MergedMaps{&MergedDeviceLibReqMask, &MergedProgramMetadata,
-                 &MergedImportedSymbols, &MergedMisc};
+             3>
+      MergedMaps{&MergedProgramMetadata, &MergedImportedSymbols, &MergedMisc};
 
   // When merging exported and imported, the exported symbols may cancel out
   // some of the imported symbols.
@@ -672,16 +692,14 @@ DynRTDeviceBinaryImage::DynRTDeviceBinaryImage(
   CopyPropertiesVec(MergedSpecConstantsDefaultValues,
                     SpecConstDefaultValuesMap);
   CopyPropertiesVec(MergedKernelParamOptInfo, KernelParamOptInfo);
-  CopyPropertiesVec(MergedAssertUsed, AssertUsed);
   CopyPropertiesVec(MergedDeviceGlobals, DeviceGlobals);
-  CopyPropertiesVec(MergedHostPipes, HostPipes);
   CopyPropertiesVec(MergedVirtualFunctions, VirtualFunctions);
   CopyPropertiesVec(MergedImplicitLocalArg, ImplicitLocalArg);
+  CopyPropertiesVec(MergedWorkGroupDynamicLocalMem, WorkGroupDynamicLocalMem);
   CopyPropertiesVec(MergedKernelNames, KernelNames);
   CopyPropertiesVec(MergedExportedSymbols, ExportedSymbols);
   CopyPropertiesVec(MergedRegisteredKernels, RegisteredKernels);
 
-  CopyPropertiesMap(MergedDeviceLibReqMask, DeviceLibReqMask);
   CopyPropertiesMap(MergedProgramMetadata, ProgramMetadata);
   CopyPropertiesMap(MergedImportedSymbols, ImportedSymbols);
   CopyPropertiesMap(MergedMisc, Misc);

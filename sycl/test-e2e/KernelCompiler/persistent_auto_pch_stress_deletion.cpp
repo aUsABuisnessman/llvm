@@ -1,3 +1,5 @@
+// REQUIRES: sycl-jit
+
 // RUN: %{build} '-DPCH_DIR="%/t.dir"' -O3 -o %t.out
 // RUN: %if hip %{ env SYCL_JIT_AMDGCN_PTX_TARGET_CPU=%{amd_arch} %} %{run} %t.out
 
@@ -23,7 +25,7 @@ int main() {
   auto Run = [&](int i) {
     std::string preamble = R"""(
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/kernel_properties/properties.hpp>
+#include <sycl/ext/oneapi/kernel_properties.hpp>
 )""";
 
     std::string body = R"""(

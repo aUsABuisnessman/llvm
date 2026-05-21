@@ -27,6 +27,10 @@ set(UR_ENABLE_TRACING ON CACHE BOOL "")
 set(UR_EXTERNAL_DEPENDENCIES "sycl-headers" CACHE STRING
   "List of external CMake targets for executables/libraries to depend on" FORCE)
 
+# Force fetch Level Zero loader and headers from github.com
+option(SYCL_UR_FORCE_FETCH_LEVEL_ZERO "Force fetching Level Zero even if preinstalled loader is found" OFF)
+set(UR_FORCE_FETCH_LEVEL_ZERO "${SYCL_UR_FORCE_FETCH_LEVEL_ZERO}" CACHE BOOL "" FORCE)
+
 if("level_zero" IN_LIST SYCL_ENABLE_BACKENDS)
   set(UR_BUILD_ADAPTER_L0 ON)
 endif()
@@ -58,7 +62,7 @@ if(WIN32)
   # FIXME: Unified runtime build fails with /DUNICODE
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /UUNICODE")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /UUNICODE")
-  # USE_Z7 forces use of /Z7 instead of /Zi which is broken with sccache
+  # USE_Z7 forces use of /Z7 instead of /Zi which is broken with (s)ccache
   set(USE_Z7 ON)
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error")
@@ -122,19 +126,6 @@ function(add_sycl_ur_adapter NAME)
   install(TARGETS ur_adapter_${NAME}
     LIBRARY DESTINATION "lib${LLVM_LIBDIR_SUFFIX}" COMPONENT ur_adapter_${NAME}
     RUNTIME DESTINATION "bin" COMPONENT ur_adapter_${NAME})
-
-  set(manifest_file
-    ${CMAKE_CURRENT_BINARY_DIR}/install_manifest_ur_adapter_${NAME}.txt)
-  add_custom_command(OUTPUT ${manifest_file}
-    COMMAND "${CMAKE_COMMAND}"
-    "-DCMAKE_INSTALL_COMPONENT=ur_adapter_${NAME}"
-    -P "${CMAKE_BINARY_DIR}/cmake_install.cmake"
-    COMMENT "Deploying component ur_adapter_${NAME}"
-    USES_TERMINAL
-  )
-  add_custom_target(install-sycl-ur-adapter-${NAME}
-    DEPENDS ${manifest_file} ur_adapter_${NAME}
-  )
 
   set_property(GLOBAL APPEND PROPERTY
     SYCL_TOOLCHAIN_INSTALL_COMPONENTS ur_adapter_${NAME})
@@ -279,7 +270,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL Windows)
     install(
       FILES ${URD_INSTALL_DIR}/bin/ur_adapter_${adapter}d.dll
       DESTINATION "bin" COMPONENT ur_adapter_${adapter})
-    add_dependencies(install-sycl-ur-adapter-${adapter} unified-runtimed)
   endforeach()
   if(UMF_BUILD_SHARED_LIBRARY)
     # Also install umfd.dll

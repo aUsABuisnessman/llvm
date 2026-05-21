@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -36,7 +35,8 @@ bool IsSameDevice(ur_device_handle_t Device1, ur_device_handle_t Device2) {
 
 } // namespace
 
-ValidateUSMResult ValidateUSMPointer(ur_context_handle_t Context,
+ValidateUSMResult ValidateUSMPointer(ur_kernel_handle_t Kernel,
+                                     ur_context_handle_t Context,
                                      ur_device_handle_t Device, uptr Ptr) {
   assert(Ptr != 0 && "Don't validate nullptr here");
 
@@ -53,7 +53,8 @@ ValidateUSMResult ValidateUSMPointer(ur_context_handle_t Context,
 
   auto AllocInfo = AllocInfoItOp.value()->second;
 
-  if (AllocInfo->Context != Context) {
+  auto &KI = getAsanInterceptor()->getOrCreateKernelInfo(Kernel);
+  if (!KI.IsIndirectAccess && AllocInfo->Context != Context) {
     return ValidateUSMResult::fail(ValidateUSMResult::BAD_CONTEXT, AllocInfo);
   }
 

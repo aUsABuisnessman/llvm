@@ -1,9 +1,8 @@
 /*
  *
- * Copyright (C) 2024 Intel Corporation
  *
- * Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM
- * Exceptions. See LICENSE.TXT
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM
+ * Exceptions. See https://llvm.org/LICENSE.txt for license information.
  *
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
@@ -77,6 +76,9 @@ struct MsanRuntimeData {
 // Based on the observation, only the last 24 bits of the address of the private
 // variable have changed
 constexpr std::size_t MSAN_PRIVATE_SIZE = 0xffffffULL + 1;
+
+constexpr uint8_t kMemInitializedMagic = 0;
+constexpr uint8_t kMemUninitializedMagic = 0xff;
 
 constexpr auto kSPIR_MsanDeviceGlobalMetadata = "__MsanDeviceGlobalMetadata";
 constexpr auto kSPIR_MsanSpirKernelMetadata = "__MsanKernelMetadata";

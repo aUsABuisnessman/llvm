@@ -1,8 +1,7 @@
 """
-Copyright (C) 2025 Intel Corporation
 
-Part of the Unified-Runtime Project, under the Apache License v2.0 with LLVM Exceptions.
-See LICENSE.TXT
+Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+See https://llvm.org/LICENSE.txt for license information.
 SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
@@ -34,3 +33,7 @@ if config.l0_static_link:
     config.available_features.add("static-link")
 
 config.environment["ONEAPI_DEVICE_SELECTOR"] = "level_zero:*"
+
+# Copy offload leads to timeouts
+# Tracker: https://jira.devtools.intel.com/browse/URT-1026
+config.environment["UR_L0_V2_FORCE_DISABLE_COPY_OFFLOAD"] = "1"
